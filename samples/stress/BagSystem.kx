@@ -1,0 +1,7 @@
+system BagSystem {
+    Bag.items.Add($"tick-{tick}");
+    Bag.stats.Set("k", tick);
+    if (Bag.stats.Get("k") > 20) {
+        despawn self;
+    }
+}

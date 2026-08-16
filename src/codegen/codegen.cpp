@@ -329,6 +329,12 @@ llvm::Value* Codegen::snapReadValue(llvm::Value* handle, int compIdx, int fieldI
   }
 }
 
+static bool isFreshCollection(const Expr* e) {
+  return e && e->kind == Expr::Kind::Call && e->lhs &&
+         e->lhs->kind == Expr::Kind::Identifier &&
+         (e->lhs->str == "List" || e->lhs->str == "Map");
+}
+
 void Codegen::emitSpawn(const Expr& e) {
   uint64_t mask = 0;
   for (const auto& t : e.spawnTags) mask |= tagBit(t) | tagAncestors(t);
@@ -347,7 +353,17 @@ void Codegen::emitSpawn(const Expr& e) {
       if (fi < 0) continue;
       auto ft = fieldType(ci.type, fi);
       auto v = genExpr(*f.second);
-      emitCompWriteValue(entity, c, fi, ft, v);
+      if (isFreshCollection(f.second.get()) && ft->isCollection()) {
+        auto take = runtimeFn("kx_comp_take_i64", llvm::Type::getVoidTy(ctx_),
+                              {llvm::Type::getInt64Ty(ctx_), llvm::Type::getInt32Ty(ctx_),
+                               llvm::Type::getInt32Ty(ctx_), llvm::Type::getInt64Ty(ctx_)});
+        builder_.CreateCall(take, {entity,
+                                   llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), c),
+                                   llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), fi),
+                                   valToI64(v)});
+      } else {
+        emitCompWriteValue(entity, c, fi, ft, v);
+      }
     }
   }
   spawnResult_ = entity;
@@ -1889,7 +1905,17 @@ void Codegen::genStmt(const Stmt& s) {
           if (fi < 0) continue;
           auto ft = fieldType(s.attachInit.type, fi);
           auto v = genExpr(*f.second);
-          emitCompWriteValue(target, c, fi, ft, v);
+          if (isFreshCollection(f.second.get()) && ft->isCollection()) {
+            auto take = runtimeFn("kx_comp_take_i64", llvm::Type::getVoidTy(ctx_),
+                                  {llvm::Type::getInt64Ty(ctx_), llvm::Type::getInt32Ty(ctx_),
+                                   llvm::Type::getInt32Ty(ctx_), llvm::Type::getInt64Ty(ctx_)});
+            builder_.CreateCall(take, {target,
+                                       llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), c),
+                                       llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), fi),
+                                       valToI64(v)});
+          } else {
+            emitCompWriteValue(target, c, fi, ft, v);
+          }
         }
       }
       return;

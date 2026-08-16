@@ -1,0 +1,4 @@
+tag Creature;
+tag Player : Creature;
+tag Monster : Creature;
+tag Tracked;

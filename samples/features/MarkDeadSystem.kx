@@ -1,0 +1,5 @@
+system MarkDeadSystem with (Counter, Marked) {
+    if (tick == 2) {
+        attach(self, Dead { gone = true });
+    }
+}

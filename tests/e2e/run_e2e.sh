@@ -124,5 +124,29 @@ fi
 PASS=$((PASS + 1))
 echo "e2e collections (List/Map, 1 box == 8 boxes): PASS"
 
-echo "e2e: $PASS/7 checks passed"
+./build/kxc build samples/features build/e2e_features
+FEAT1=$(KUBEXIC_CORES=1 timeout 10 ./build/e2e_features)
+FEAT8=$(KUBEXIC_CORES=8 timeout 10 ./build/e2e_features)
+EXPECTED="tick 0: creatures=3 exactMonsters=2
+tick 1: creatures=3 exactMonsters=2
+tick 2: creatures=3 exactMonsters=2
+two or three
+name=KUBEX len=5 sub=KUB
+items=2 roll=10 roll2=10 same=true
+tick 3: creatures=3 exactMonsters=2
+features demo done"
+if [ "$FEAT1" != "$EXPECTED" ]; then
+  echo "e2e features: FAIL"
+  echo "--- expected ---"; echo "$EXPECTED"
+  echo "--- got ---"; echo "$FEAT1"
+  exit 1
+fi
+if [ "$FEAT8" != "$FEAT1" ]; then
+  echo "e2e features: FAIL (multi-box differs)"
+  exit 1
+fi
+PASS=$((PASS + 1))
+echo "e2e features (switch/strings/overloads/without/exact tags/rng, 1 box == 8 boxes): PASS"
+
+echo "e2e: $PASS/8 checks passed"
 exit 0

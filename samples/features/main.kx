@@ -1,0 +1,9 @@
+int main() {
+    spawn { Counter { value = 0 }, PlayerData { name = "kubex", rng = std.rng(7), inventory = List<string>() }, tags [Player, Tracked] };
+    spawn { Counter { value = 0 }, MonsterData { kind = "orc" }, tags [Monster] };
+    spawn { Counter { value = 0 }, MonsterData { kind = "goblin" }, tags [Monster] };
+    spawn { Counter { value = 0 }, Marked { }, tags [Tracked] };
+    run(max, ticks: 4);
+    std.println("features demo done");
+    return 0;
+}

@@ -1,0 +1,8 @@
+int main() {
+    for (var i = 0; i < 2000; i++) {
+        spawn { Bag { items = List<string>(), stats = Map<string, long>() } };
+    }
+    run(max, ticks: 40);
+    std.println("stress done");
+    return 0;
+}

@@ -1,0 +1,13 @@
+system WatchSystem {
+    var count = 0;
+    foreach (var t in others<Counter>(tag: Creature)) {
+        count += 1;
+    }
+    var exactCount = 0;
+    foreach (var t in others<Counter>(tag: exact Monster)) {
+        exactCount += 1;
+    }
+    if (count > 0) {
+        std.println($"tick {tick}: creatures={count} exactMonsters={exactCount}");
+    }
+}

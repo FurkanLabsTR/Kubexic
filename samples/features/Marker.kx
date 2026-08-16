@@ -1,0 +1,6 @@
+component Marked {
+}
+
+component Dead {
+    var gone = false;
+}

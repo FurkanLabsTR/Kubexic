@@ -1,0 +1,5 @@
+component PlayerData {
+    var name = "";
+    var rng = std.rng(7);
+    var inventory = List<string>();
+}

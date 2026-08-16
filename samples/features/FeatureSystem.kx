@@ -1,0 +1,27 @@
+system FeatureSystem {
+    var word = PlayerData.name.Upper();
+    if (Counter.value == 3) {
+        switch (Counter.value) {
+            case 1:
+                std.println("one");
+                break;
+            case 2:
+            case 3:
+                std.println("two or three");
+                break;
+            default:
+                std.println("other");
+                break;
+        }
+        std.println($"name={word} len={word.Length} sub={word.Substring(0, 3)}");
+        PlayerData.inventory.Add($"item-{Counter.value}");
+        PlayerData.inventory.Add("sword");
+        var total = 0;
+        foreach (var it in PlayerData.inventory) {
+            total += 1;
+        }
+        var roll = PlayerData.rng.NextInt(100);
+        var pi = std.rng(7).NextInt(100);
+        std.println($"items={total} roll={roll} roll2={pi} same={roll == pi}");
+    }
+}

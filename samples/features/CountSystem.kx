@@ -1,0 +1,3 @@
+system CountSystem without (Dead) {
+    Counter.value += 1;
+}

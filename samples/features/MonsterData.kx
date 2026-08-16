@@ -1,0 +1,3 @@
+component MonsterData {
+    var kind = "";
+}

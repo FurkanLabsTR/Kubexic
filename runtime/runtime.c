@@ -19,6 +19,7 @@ typedef long long kx_entity;
 
 void kx_panic(const char* msg);
 void kx_poll_stdin(void);
+char* kx_dup(const char* s);
 
 /* ---- collections (ownership trees: never shared, deep-copied) ---- */
 
@@ -71,6 +72,7 @@ void kx_list_add(long long h, long long val) {
     v->cap *= 2;
     v->data = (long long*)realloc(v->data, v->cap * 8);
   }
+  if (v->elemKind == KX_KIND_STR) val = (long long)(uintptr_t)kx_dup((char*)(uintptr_t)val);
   v->data[v->size++] = val;
 }
 
@@ -83,6 +85,10 @@ long long kx_list_get(long long h, long long i) {
 void kx_list_set(long long h, long long i, long long val) {
   kx_vec* v = vecOf(h);
   if (!v || i < 0 || i >= v->size) kx_panic("List.Set: index out of range");
+  if (v->elemKind == KX_KIND_STR) {
+    free((void*)(uintptr_t)v->data[i]);
+    val = (long long)(uintptr_t)kx_dup((char*)(uintptr_t)val);
+  }
   v->data[i] = val;
 }
 
@@ -179,12 +185,17 @@ long long kx_map_new(int keyKind, int valKind) {
 void kx_map_set(long long h, long long key, long long val) {
   kx_map* m = mapOf(h);
   if (!m) return;
+  if (m->keyKind == KX_KIND_STR) key = (long long)(uintptr_t)kx_dup((char*)(uintptr_t)key);
+  if (m->valKind == KX_KIND_STR) val = (long long)(uintptr_t)kx_dup((char*)(uintptr_t)val);
   if ((m->size + 1) * 10 >= m->cap * 7) mapGrow(m);
   long long i = hashKey(m, key) & (m->cap - 1);
   while (m->keys[i] != 0 && !keyEq(m, m->keys[i], key)) i = (i + 1) & (m->cap - 1);
   if (m->keys[i] == 0) {
     m->keys[i] = key;
     m->size++;
+  } else {
+    if (m->keyKind == KX_KIND_STR) free((void*)(uintptr_t)key);
+    if (m->valKind == KX_KIND_STR) free((void*)(uintptr_t)m->vals[i]);
   }
   m->vals[i] = val;
 }
@@ -256,7 +267,10 @@ static long long copyHandle(long long h, int kind) {
       nv->data = (long long*)realloc(nv->data, nv->cap * 8);
     }
     for (long long i = 0; i < v->size; i++) {
-      nv->data[i] = v->elemKind == KX_KIND_COLL ? copyHandle(v->data[i], 3) : v->data[i];
+      long long el = v->data[i];
+      if (v->elemKind == KX_KIND_COLL) el = copyHandle(el, 3);
+      else if (v->elemKind == KX_KIND_STR) el = (long long)(uintptr_t)kx_dup((char*)(uintptr_t)el);
+      nv->data[i] = el;
     }
     nv->size = v->size;
     return nh;
@@ -280,8 +294,9 @@ static void freeHandle(long long h) {
   kx_collection* c = (kx_collection*)(uintptr_t)h;
   if (c->kind == KX_COLLECTION_LIST) {
     kx_vec* v = (kx_vec*)h;
-    if (v->elemKind == KX_KIND_COLL) {
-      for (long long i = 0; i < v->size; i++) freeHandle(v->data[i]);
+    for (long long i = 0; i < v->size; i++) {
+      if (v->elemKind == KX_KIND_COLL) freeHandle(v->data[i]);
+      else if (v->elemKind == KX_KIND_STR) free((void*)(uintptr_t)v->data[i]);
     }
     free(v->data);
     free(v);
@@ -290,7 +305,9 @@ static void freeHandle(long long h) {
     for (long long i = 0; i < m->cap; i++) {
       if (m->keys[i] == 0) continue;
       if (m->keyKind == KX_KIND_COLL) freeHandle(m->keys[i]);
+      else if (m->keyKind == KX_KIND_STR) free((void*)(uintptr_t)m->keys[i]);
       if (m->valKind == KX_KIND_COLL) freeHandle(m->vals[i]);
+      else if (m->valKind == KX_KIND_STR) free((void*)(uintptr_t)m->vals[i]);
     }
     free(m->keys);
     free(m->vals);
@@ -335,6 +352,7 @@ typedef struct {
   long long* fComps;
   long long fSize;
   void** fFields;
+  void** fzFields;
 } kx_box;
 
 static int g_compCount;
@@ -490,20 +508,28 @@ static kx_box* resolveBox(kx_entity e) {
   return resolve(e, &b, &s) ? b : NULL;
 }
 
+static void growArr(void** arr, size_t elemSize, int oldCap, int newCap) {
+  void* fresh = realloc(*arr, elemSize * newCap);
+  if (!fresh) return;
+  memset((char*)fresh + elemSize * oldCap, 0, elemSize * (newCap - oldCap));
+  *arr = fresh;
+}
+
 static void growBox(kx_box* b) {
+  int oldCap = b->cap;
   int newCap = b->cap * 2;
-  b->tagMasks = (long long*)realloc(b->tagMasks, sizeof(long long) * newCap);
-  b->compMasks = (long long*)realloc(b->compMasks, sizeof(long long) * newCap);
-  b->gens = (int*)realloc(b->gens, sizeof(int) * newCap);
+  growArr((void**)&b->tagMasks, sizeof(long long), oldCap, newCap);
+  growArr((void**)&b->compMasks, sizeof(long long), oldCap, newCap);
+  growArr((void**)&b->gens, sizeof(int), oldCap, newCap);
   for (int c = 0; c < g_compCount; c++) {
     for (int f = 0; f < g_fieldCounts[c]; f++) {
-      b->fFields[c * KX_MAX_FIELDS + f] =
-          realloc(b->fFields[c * KX_MAX_FIELDS + f], 8 * newCap);
+      growArr(&b->fFields[c * KX_MAX_FIELDS + f], 8, oldCap, newCap);
+      growArr(&b->fzFields[c * KX_MAX_FIELDS + f], 8, oldCap, newCap);
     }
   }
-  b->fIds = (long long*)realloc(b->fIds, sizeof(long long) * newCap);
-  b->fTags = (long long*)realloc(b->fTags, sizeof(long long) * newCap);
-  b->fComps = (long long*)realloc(b->fComps, sizeof(long long) * newCap);
+  growArr((void**)&b->fIds, sizeof(long long), oldCap, newCap);
+  growArr((void**)&b->fTags, sizeof(long long), oldCap, newCap);
+  growArr((void**)&b->fComps, sizeof(long long), oldCap, newCap);
   b->cap = newCap;
 }
 
@@ -517,7 +543,10 @@ static void createBoxes(int count) {
       free(g_boxes[i].compMasks);
       free(g_boxes[i].gens);
       for (int c = 0; c < g_compCount; c++) {
-        for (int f = 0; f < g_fieldCounts[c]; f++) free(g_boxes[i].fFields[c * KX_MAX_FIELDS + f]);
+        for (int f = 0; f < g_fieldCounts[c]; f++) {
+          free(g_boxes[i].fFields[c * KX_MAX_FIELDS + f]);
+          free(g_boxes[i].fzFields[c * KX_MAX_FIELDS + f]);
+        }
       }
       for (int s = 0; s < count; s++) {
         free(g_boxes[i].queues[s]);
@@ -530,6 +559,7 @@ static void createBoxes(int count) {
       free(g_boxes[i].fTags);
       free(g_boxes[i].fComps);
       free(g_boxes[i].fFields);
+      free(g_boxes[i].fzFields);
       pthread_mutex_destroy(&g_boxes[i].allocLock);
     }
     free(g_boxes);
@@ -545,9 +575,11 @@ static void createBoxes(int count) {
     b->compMasks = (long long*)calloc(b->cap, sizeof(long long));
     b->gens = (int*)calloc(b->cap, sizeof(int));
     b->fFields = (void**)calloc(g_compCount * KX_MAX_FIELDS, sizeof(void*));
+    b->fzFields = (void**)calloc(g_compCount * KX_MAX_FIELDS, sizeof(void*));
     for (int c = 0; c < g_compCount; c++) {
       for (int f = 0; f < g_fieldCounts[c]; f++) {
         b->fFields[c * KX_MAX_FIELDS + f] = calloc(8, b->cap);
+        b->fzFields[c * KX_MAX_FIELDS + f] = calloc(8, b->cap);
       }
     }
     b->fIds = (long long*)calloc(b->cap, sizeof(long long));
@@ -617,9 +649,13 @@ static void applyRequest(kx_entity e, const kx_req* r) {
       break;
     case REQ_DETACH:
       for (int f = 0; f < g_fieldCounts[r->comp]; f++) {
-        if (g_fieldTypes[r->comp * KX_MAX_FIELDS + f] == KX_KIND_COLL) {
+        int kind = g_fieldTypes[r->comp * KX_MAX_FIELDS + f];
+        if (kind == KX_KIND_COLL) {
           long long h = ((long long*)b->fFields[r->comp * KX_MAX_FIELDS + f])[slot];
           freeHandle(h);
+          ((long long*)b->fFields[r->comp * KX_MAX_FIELDS + f])[slot] = 0;
+        } else if (kind == KX_KIND_STR) {
+          free((void*)(uintptr_t)((long long*)b->fFields[r->comp * KX_MAX_FIELDS + f])[slot]);
           ((long long*)b->fFields[r->comp * KX_MAX_FIELDS + f])[slot] = 0;
         }
       }
@@ -629,10 +665,14 @@ static void applyRequest(kx_entity e, const kx_req* r) {
       for (int c = 0; c < g_compCount; c++) {
         if (!(b->compMasks[slot] & (1LL << c))) continue;
         for (int f = 0; f < g_fieldCounts[c]; f++) {
-          if (g_fieldTypes[c * KX_MAX_FIELDS + f] == KX_KIND_COLL) {
-            long long h = ((long long*)b->fFields[c * KX_MAX_FIELDS + f])[slot];
-            freeHandle(h);
-            ((long long*)b->fFields[c * KX_MAX_FIELDS + f])[slot] = 0;
+          int kind = g_fieldTypes[c * KX_MAX_FIELDS + f];
+          long long* arr = (long long*)b->fFields[c * KX_MAX_FIELDS + f];
+          if (kind == KX_KIND_COLL) {
+            freeHandle(arr[slot]);
+            arr[slot] = 0;
+          } else if (kind == KX_KIND_STR) {
+            free((void*)(uintptr_t)arr[slot]);
+            arr[slot] = 0;
           }
         }
       }
@@ -791,39 +831,74 @@ char* kx_comp_read_str(kx_entity e, int comp, int field) {
   return ((char**)b->fFields[comp * KX_MAX_FIELDS + field])[slot];
 }
 
+void kx_comp_take_i64(kx_entity e, int comp, int field, long long v) {
+  kx_box* b;
+  long long slot;
+  if (!resolve(e, &b, &slot)) return;
+  if (comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp]) return;
+  long long* dst = (long long*)b->fFields[comp * KX_MAX_FIELDS + field];
+  if (g_fieldTypes[comp * KX_MAX_FIELDS + field] == KX_KIND_COLL) {
+    freeHandle(dst[slot]);
+  }
+  dst[slot] = v;
+}
+
 void kx_comp_write_str(kx_entity e, int comp, int field, char* v) {
   kx_box* b;
   long long slot;
   if (!resolve(e, &b, &slot)) return;
   if (comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp]) return;
-  ((char**)b->fFields[comp * KX_MAX_FIELDS + field])[slot] = v;
+  char** dst = (char**)b->fFields[comp * KX_MAX_FIELDS + field];
+  free(dst[slot]);
+  dst[slot] = kx_dup(v ? v : "");
 }
 
 /* ---- freeze (per-box) + merge (sorted by entity id: deterministic
  * regardless of box placement or migration) ---- */
 
+static void freeFrozenSlot(kx_box* b, long long idx) {
+  for (int c = 0; c < g_compCount; c++) {
+    for (int f = 0; f < g_fieldCounts[c]; f++) {
+      int kind = g_fieldTypes[c * KX_MAX_FIELDS + f];
+      if (kind != KX_KIND_COLL && kind != KX_KIND_STR) continue;
+      long long* dst = (long long*)b->fzFields[c * KX_MAX_FIELDS + f];
+      if (kind == KX_KIND_COLL) {
+        freeHandle(dst[idx]);
+      } else {
+        free((void*)(uintptr_t)dst[idx]);
+      }
+    }
+  }
+}
+
 static void freezeBox(kx_box* b) {
+  long long prev = b->fSize;
   long long fs = 0;
   for (int slot = 0; slot < b->size; slot++) {
-    if (!slotAlive(b, slot)) continue;
+    long long cm = slotAlive(b, slot) ? b->compMasks[slot] : 0;
+    if (cm == 0) continue;
+    if (fs < prev) freeFrozenSlot(b, fs);
     b->fIds[fs] = ((kx_entity)((b - g_boxes)) << 48) | (slot << 16) | b->gens[slot];
     b->fTags[fs] = b->tagMasks[slot];
-    long long cm = b->compMasks[slot];
     b->fComps[fs] = cm;
     for (int c = 0; c < g_compCount; c++) {
       if (!(cm & (1LL << c))) continue;
       for (int f = 0; f < g_fieldCounts[c]; f++) {
-        long long* src = (long long*)b->fFields[c * KX_MAX_FIELDS + f];
-        long long* dst = (long long*)b->fFields[c * KX_MAX_FIELDS + f];
-        if (g_fieldTypes[c * KX_MAX_FIELDS + f] == KX_KIND_COLL) {
-          dst[fs] = copyHandle(src[slot], 3);
+        long long* srcArr = (long long*)b->fFields[c * KX_MAX_FIELDS + f];
+        long long* dstArr = (long long*)b->fzFields[c * KX_MAX_FIELDS + f];
+        int kind = g_fieldTypes[c * KX_MAX_FIELDS + f];
+        if (kind == KX_KIND_COLL) {
+          dstArr[fs] = copyHandle(srcArr[slot], 3);
+        } else if (kind == KX_KIND_STR) {
+          dstArr[fs] = (long long)(uintptr_t)kx_dup((char*)(uintptr_t)srcArr[slot]);
         } else {
-          dst[fs] = src[slot];
+          dstArr[fs] = srcArr[slot];
         }
       }
     }
     fs++;
   }
+  for (long long i = fs; i < prev; i++) freeFrozenSlot(b, i);
   b->fSize = fs;
 }
 
@@ -842,15 +917,18 @@ static int cmpFent(const void* a, const void* b) {
   return x < y ? -1 : (x > y ? 1 : 0);
 }
 
+static void growGlobalFrozen(long long minSlots);
+
 static void mergeFrozen(void) {
   long long total = 0;
   for (int i = 0; i < g_boxCount; i++) total += g_boxes[i].fSize;
   if (total > 0) {
-    int cap = g_boxCount * KX_INIT_ENTITIES;
+    long long cap = g_boxCount * KX_INIT_ENTITIES;
     while (cap < total) cap *= 2;
     g_frozenIds = (long long*)realloc(g_frozenIds, sizeof(long long) * cap);
     g_frozenTagMasks = (long long*)realloc(g_frozenTagMasks, sizeof(long long) * cap);
     g_frozenCompMasks = (long long*)realloc(g_frozenCompMasks, sizeof(long long) * cap);
+    growGlobalFrozen(total);
   }
   if (total > g_sortCap) {
     g_sortCap = total > 0 ? total : 1;
@@ -879,7 +957,7 @@ static void mergeFrozen(void) {
       if (!(cm & (1LL << c))) continue;
       for (int f = 0; f < g_fieldCounts[c]; f++) {
         memcpy((char*)g_frozenFields[c * KX_MAX_FIELDS + f] + fs * 8,
-               (char*)b->fFields[c * KX_MAX_FIELDS + f] + j * 8, 8);
+               (char*)b->fzFields[c * KX_MAX_FIELDS + f] + j * 8, 8);
       }
     }
     fs++;
@@ -887,11 +965,12 @@ static void mergeFrozen(void) {
   g_frozenSize = fs;
 }
 
-static void growGlobalFrozen(void) {
+static void growGlobalFrozen(long long minSlots) {
   if (!g_frozenFields) {
     g_frozenFields = (void**)calloc(g_compCount * KX_MAX_FIELDS, sizeof(void*));
   }
-  int cap = g_boxCount * KX_INIT_ENTITIES;
+  long long cap = g_boxCount * KX_INIT_ENTITIES;
+  while (cap < minSlots) cap *= 2;
   for (int c = 0; c < g_compCount; c++) {
     for (int f = 0; f < g_fieldCounts[c]; f++) {
       g_frozenFields[c * KX_MAX_FIELDS + f] =
@@ -1104,7 +1183,7 @@ void kx_run(int tps, long long maxTicks, double cores) {
   if (boxCount > KX_MAX_BOXES) boxCount = KX_MAX_BOXES;
 
   createBoxes(boxCount);
-  growGlobalFrozen();
+  growGlobalFrozen(0);
 
   bufFlush(g_boxCount);
   for (int i = 0; i < g_boxCount; i++) commitBox(&g_boxes[i]);
@@ -1223,7 +1302,7 @@ void kx_run(int tps, long long maxTicks, double cores) {
 
 /* ---- console, string helpers, process control ---- */
 
-static char* kx_dup(const char* s) {
+char* kx_dup(const char* s) {
   size_t n = strlen(s);
   char* p = (char*)malloc(n + 1);
   if (p) memcpy(p, s, n + 1);

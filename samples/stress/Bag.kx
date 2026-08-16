@@ -1,0 +1,4 @@
+component Bag {
+    var items = List<string>();
+    var stats = Map<string, long>();
+}
