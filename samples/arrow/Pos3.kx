@@ -1,0 +1,6 @@
+// Pos3.kx
+component Pos3 {
+    var x = 0.0;
+    var y = 0.0;
+    var z = 0.0;
+}

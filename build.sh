@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 mkdir -p build
-FLAGS=(-std=c++17 -Wall -Wextra -Wpedantic -g -Isrc -Isrc/lexer -Isrc/parser -Isrc/ast -Itests)
+FLAGS=(-std=c++17 -Wall -Wextra -Wpedantic -g -Isrc -Isrc/lexer -Isrc/parser -Isrc/ast -Isrc/sema -Itests)
 
 echo "== building lexer tests =="
 g++ "${FLAGS[@]}" \
@@ -19,8 +19,17 @@ g++ "${FLAGS[@]}" \
 ./build/parser_tests
 
 echo
+echo "== building sema tests =="
+g++ "${FLAGS[@]}" \
+  src/lexer/lexer.cpp src/parser/parser.cpp src/sema/types.cpp src/sema/checker.cpp \
+  tests/sema_tests.cpp \
+  -o build/sema_tests
+./build/sema_tests
+
+echo
 echo "== building kxc =="
 g++ "${FLAGS[@]}" \
-  src/lexer/lexer.cpp src/parser/parser.cpp tools/kxc/main.cpp \
+  src/lexer/lexer.cpp src/parser/parser.cpp src/sema/types.cpp src/sema/checker.cpp \
+  tools/kxc/main.cpp \
   -o build/kxc
-./build/kxc dump samples/arrow/main.kx
+./build/kxc check-dir samples/arrow

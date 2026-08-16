@@ -96,6 +96,7 @@ struct Token {
   std::int64_t intValue = 0;
   double floatValue = 0.0;
   bool isFloat = false;
+  bool isLong = false;
   int line = 0;
   int col = 0;
 };

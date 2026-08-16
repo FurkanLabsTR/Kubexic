@@ -1,6 +1,7 @@
 #pragma once
 
 #include "token.h"
+#include "types.h"
 
 #include <cstdint>
 #include <memory>
@@ -61,10 +62,12 @@ struct Expr {
 
   Kind kind;
   SourceLoc loc;
+  std::shared_ptr<Type> type;
 
   std::int64_t intValue = 0;
   double floatValue = 0.0;
   bool isFloat = false;
+  bool isLong = false;
   std::string str;
   std::string member;
 

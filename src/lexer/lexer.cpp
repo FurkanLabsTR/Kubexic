@@ -245,7 +245,7 @@ Token Lexer::scanNumber() {
   } else {
     t.intValue = std::strtoll(text.c_str(), nullptr, 10);
   }
-  (void)longSuffix;
+  t.isLong = longSuffix;
   return t;
 }
 
