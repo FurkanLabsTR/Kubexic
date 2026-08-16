@@ -12,3 +12,8 @@ add_executable(sema_tests sema_tests.cpp)
 target_link_libraries(sema_tests PRIVATE kubexic_core)
 target_include_directories(sema_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME sema_tests COMMAND sema_tests)
+
+add_executable(mir_tests mir_tests.cpp)
+target_link_libraries(mir_tests PRIVATE kubexic_core)
+target_include_directories(mir_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME mir_tests COMMAND mir_tests)

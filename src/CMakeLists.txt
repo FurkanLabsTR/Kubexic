@@ -3,6 +3,7 @@ add_library(kubexic_core STATIC
   parser/parser.cpp
   sema/types.cpp
   sema/checker.cpp
+  mir/mir.cpp
 )
 target_include_directories(kubexic_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
@@ -10,4 +11,5 @@ target_include_directories(kubexic_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/parser
   ${CMAKE_CURRENT_SOURCE_DIR}/ast
   ${CMAKE_CURRENT_SOURCE_DIR}/sema
+  ${CMAKE_CURRENT_SOURCE_DIR}/mir
 )
