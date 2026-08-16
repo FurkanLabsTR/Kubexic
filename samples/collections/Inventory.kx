@@ -1,0 +1,5 @@
+// Inventory.kx — components with List and Map fields
+component Inventory {
+    var items = List<string>();
+    var stats = Map<string, long>();
+}

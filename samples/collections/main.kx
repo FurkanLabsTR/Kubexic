@@ -1,0 +1,10 @@
+// main.kx
+int main() {
+    spawn {
+        Inventory { items = List<string>(), stats = Map<string, long>() },
+        tags [Tracked]
+    };
+    run(max, ticks: 8);
+    std.println("collections demo done");
+    return 0;
+}

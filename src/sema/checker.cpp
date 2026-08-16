@@ -17,6 +17,25 @@ bool isEntityIdish(const std::shared_ptr<Type>& t) {
   return t->isUnknownish() || t->kind == TypeKind::EntityId || t->kind == TypeKind::Self;
 }
 
+bool isIndexish(const std::shared_ptr<Type>& t) {
+  return t->isUnknownish() || t->kind == TypeKind::Int || t->kind == TypeKind::Long ||
+         t->kind == TypeKind::Byte;
+}
+
+bool isFrozenAccess(const Expr* e) {
+  if (!e) return false;
+  switch (e->kind) {
+    case Expr::Kind::Identifier:
+      return e->type && e->type->kind == TypeKind::Snapshot;
+    case Expr::Kind::MemberAccess:
+      return isFrozenAccess(e->lhs.get());
+    case Expr::Kind::Call:
+      return isFrozenAccess(e->lhs.get());
+    default:
+      return false;
+  }
+}
+
 }  // namespace
 
 void Checker::addProgram(std::unique_ptr<Program> program) {
@@ -349,6 +368,16 @@ std::shared_ptr<Type> Checker::infer(Expr& e) {
           e.type = Type::make(TypeKind::Error);
           return e.type;
         }
+        case TypeKind::List:
+        case TypeKind::Map:
+          if (e.member == "Count") {
+            e.type = Type::make(TypeKind::Long);
+            return e.type;
+          }
+          error(e.loc, (bt->kind == TypeKind::List ? "'List'" : "'Map'") +
+                           std::string(" has no member '") + e.member + "'");
+          e.type = Type::make(TypeKind::Error);
+          return e.type;
         default:
           if (bt->isUnknownish()) {
             e.type = Type::make(TypeKind::Unknown);
@@ -578,6 +607,31 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
       return call.type;
     }
 
+    if (name == "List") {
+      if (call.typeArgs.size() != 1) {
+        error(call.loc, "'List' requires one type argument: List<T>");
+        call.type = Type::make(TypeKind::Error);
+        return call.type;
+      }
+      if (!call.args.empty()) error(call.loc, "'List' constructor takes no arguments");
+      auto inner = typeFromTypeName(call.typeArgs[0], call.loc);
+      call.type = Type::list(inner);
+      return call.type;
+    }
+
+    if (name == "Map") {
+      if (call.typeArgs.size() != 2) {
+        error(call.loc, "'Map' requires two type arguments: Map<K, V>");
+        call.type = Type::make(TypeKind::Error);
+        return call.type;
+      }
+      if (!call.args.empty()) error(call.loc, "'Map' constructor takes no arguments");
+      auto key = typeFromTypeName(call.typeArgs[0], call.loc);
+      auto val = typeFromTypeName(call.typeArgs[1], call.loc);
+      call.type = Type::map(key, val);
+      return call.type;
+    }
+
     auto it = functions_.find(name);
     if (it != functions_.end()) {
       const Decl& fn = *it->second;
@@ -646,6 +700,89 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
     }
 
     auto bt = infer(*base);
+    if (bt->kind == TypeKind::List || bt->kind == TypeKind::Map) {
+      const std::string& m = callee->member;
+      bool mutating = m == "Add" || m == "Set" || m == "RemoveAt" || m == "Remove" ||
+                      m == "Clear";
+      if (mutating && isFrozenAccess(base)) {
+        error(call.loc, "cannot mutate another entity's data through a frozen snapshot");
+        call.type = Type::make(TypeKind::Error);
+        return call.type;
+      }
+      auto checkArg = [&](size_t i, const std::shared_ptr<Type>& want, const char* what) {
+        if (call.args.size() <= i) {
+          error(call.loc, std::string(what) + " requires " + std::to_string(i + 1) +
+                              " argument(s)");
+          return;
+        }
+        auto at = infer(*call.args[i].value);
+        if (!assignable(want, at)) {
+          error(call.loc, std::string(what) + " argument " + std::to_string(i + 1) +
+                              " expects " + want->describe() + ", got " + at->describe());
+        }
+      };
+      if (bt->kind == TypeKind::List) {
+        if (m == "Add") {
+          checkArg(0, bt->inner ? bt->inner : Type::make(TypeKind::Int), "List.Add");
+          call.type = Type::make(TypeKind::Void);
+          return call.type;
+        }
+        if (m == "Get") {
+          checkArg(0, Type::make(TypeKind::Long), "List.Get");
+          call.type = bt->inner ? bt->inner : Type::make(TypeKind::Unknown);
+          return call.type;
+        }
+        if (m == "Set") {
+          checkArg(0, Type::make(TypeKind::Long), "List.Set");
+          checkArg(1, bt->inner ? bt->inner : Type::make(TypeKind::Int), "List.Set");
+          call.type = Type::make(TypeKind::Void);
+          return call.type;
+        }
+        if (m == "RemoveAt") {
+          checkArg(0, Type::make(TypeKind::Long), "List.RemoveAt");
+          call.type = Type::make(TypeKind::Void);
+          return call.type;
+        }
+        if (m == "Clear") {
+          if (!call.args.empty()) error(call.loc, "List.Clear takes no arguments");
+          call.type = Type::make(TypeKind::Void);
+          return call.type;
+        }
+        error(call.loc, "'List' has no method '" + m + "'");
+        call.type = Type::make(TypeKind::Error);
+        return call.type;
+      }
+      if (m == "Set") {
+        checkArg(0, bt->inner ? bt->inner : Type::make(TypeKind::Int), "Map.Set");
+        checkArg(1, bt->inner2 ? bt->inner2 : Type::make(TypeKind::Int), "Map.Set");
+        call.type = Type::make(TypeKind::Void);
+        return call.type;
+      }
+      if (m == "Get") {
+        checkArg(0, bt->inner ? bt->inner : Type::make(TypeKind::Int), "Map.Get");
+        call.type = bt->inner2 ? bt->inner2 : Type::make(TypeKind::Unknown);
+        return call.type;
+      }
+      if (m == "Has") {
+        checkArg(0, bt->inner ? bt->inner : Type::make(TypeKind::Int), "Map.Has");
+        call.type = Type::make(TypeKind::Bool);
+        return call.type;
+      }
+      if (m == "Remove") {
+        checkArg(0, bt->inner ? bt->inner : Type::make(TypeKind::Int), "Map.Remove");
+        call.type = Type::make(TypeKind::Void);
+        return call.type;
+      }
+      if (m == "Clear") {
+        if (!call.args.empty()) error(call.loc, "Map.Clear takes no arguments");
+        call.type = Type::make(TypeKind::Void);
+        return call.type;
+      }
+      error(call.loc, "'Map' has no method '" + m + "'");
+      call.type = Type::make(TypeKind::Error);
+      return call.type;
+    }
+
     if (bt->isUnknownish()) {
       for (auto& a : call.args) infer(*a.value);
       call.type = Type::make(TypeKind::Unknown);
@@ -749,11 +886,13 @@ void Checker::checkStmt(Stmt& s) {
       auto ct = infer(*s.container);
       if (ct->kind == TypeKind::Snapshot) {
         addLocal(s.varName, ct);
+      } else if (ct->kind == TypeKind::List) {
+        addLocal(s.varName, ct->inner ? ct->inner : Type::make(TypeKind::Unknown));
       } else if (ct->isUnknownish()) {
         addLocal(s.varName, Type::make(TypeKind::Unknown));
       } else {
-        error(s.loc, "foreach requires a snapshot ('others<...>') or collection, got " +
-                         ct->describe());
+        error(s.loc, "foreach requires a snapshot ('others<...>'), a List, or a collection, "
+                         "got " + ct->describe());
         addLocal(s.varName, Type::make(TypeKind::Unknown));
       }
       loopDepth_++;

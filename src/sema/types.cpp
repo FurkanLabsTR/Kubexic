@@ -38,6 +38,23 @@ std::shared_ptr<Type> Type::snapshot(std::vector<std::string> components) {
   return t;
 }
 
+std::shared_ptr<Type> Type::list(std::shared_ptr<Type> inner) {
+  auto t = make(TypeKind::List);
+  t->inner = std::move(inner);
+  return t;
+}
+
+std::shared_ptr<Type> Type::map(std::shared_ptr<Type> key, std::shared_ptr<Type> val) {
+  auto t = make(TypeKind::Map);
+  t->inner = std::move(key);
+  t->inner2 = std::move(val);
+  return t;
+}
+
+bool Type::isCollection() const {
+  return kind == TypeKind::List || kind == TypeKind::Map;
+}
+
 bool Type::isNumeric() const {
   return kind == TypeKind::Int || kind == TypeKind::Long || kind == TypeKind::Float ||
          kind == TypeKind::Double || kind == TypeKind::Byte;
@@ -68,6 +85,11 @@ std::string Type::describe() const {
     case TypeKind::Function: return "function";
     case TypeKind::Snapshot:
       return "snapshot";
+    case TypeKind::List:
+      return inner ? "List<" + inner->describe() + ">" : "List<?>";
+    case TypeKind::Map:
+      return "Map<" + (inner ? inner->describe() : std::string("?")) + ", " +
+             (inner2 ? inner2->describe() : std::string("?")) + ">";
     case TypeKind::Self: return "self";
     case TypeKind::Generic: return "any";
     case TypeKind::Unknown: return "unknown";
@@ -101,7 +123,13 @@ std::shared_ptr<Type> promote(const std::shared_ptr<Type>& a, const std::shared_
 
 bool assignable(const std::shared_ptr<Type>& dst, const std::shared_ptr<Type>& src) {
   if (dst->isUnknownish() || src->isUnknownish()) return true;
-  if (dst->kind == src->kind) return true;
+  if (dst->kind == src->kind) {
+    if (dst->kind == TypeKind::List) return assignable(dst->inner, src->inner);
+    if (dst->kind == TypeKind::Map) {
+      return assignable(dst->inner, src->inner) && assignable(dst->inner2, src->inner2);
+    }
+    return true;
+  }
   if (dst->isNumeric() && src->isNumeric()) return numericRank(src) <= numericRank(dst);
   return false;
 }

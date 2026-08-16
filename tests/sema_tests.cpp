@@ -226,4 +226,55 @@ KX_TEST(tick_and_dt_builtins) {
   Expect::false_(ok({"int main() { var x = dt; return 0; }"}), "dt outside system");
 }
 
+KX_TEST(collections_list_map) {
+  Expect::true_(ok({
+      "component Inv { var items = List<string>(); var stats = Map<string, long>(); }",
+      "system S { Inv.items.Add(\"x\"); var n = Inv.items.Count; var s = Inv.items.Get(0); "
+      "Inv.items.Set(0, \"y\"); Inv.items.RemoveAt(0); Inv.items.Clear(); "
+      "Inv.stats.Set(\"hp\", 10); var v = Inv.stats.Get(\"hp\"); var h = Inv.stats.Has(\"hp\"); "
+      "Inv.stats.Remove(\"hp\"); Inv.stats.Clear(); }",
+      "int main() { var l = List<int>(); l.Add(1); var m = Map<string, int>(); "
+      "m.Set(\"k\", 2); return 0; }",
+  }), "valid collections usage");
+}
+
+KX_TEST(collections_type_mismatch) {
+  Expect::false_(ok({
+      "component Inv { var items = List<int>(); }",
+      "system S { Inv.items.Add(\"not an int\"); }",
+      "int main() { return 0; }",
+  }), "string into List<int>");
+  Expect::false_(ok({
+      "int main() { var l = List<int>(); l.Add(\"x\"); return 0; }",
+  }), "string into List<int> local");
+}
+
+KX_TEST(collections_foreach_unwrap) {
+  Expect::true_(ok({
+      "system S { var total = 0; foreach (var it in List<int>()) { total += it; } }",
+      "int main() { return 0; }",
+  }), "foreach over List<int> unwraps int");
+}
+
+KX_TEST(collections_frozen_mutation_rejected) {
+  Expect::false_(ok({
+      "component Inv { var items = List<int>(); }",
+      "tag T;",
+      "system S { foreach (var t in others<Inv>(tag: T)) { t.Inv.items.Add(1); } }",
+      "int main() { return 0; }",
+  }), "mutating another entity's list through a snapshot");
+  Expect::true_(ok({
+      "component Inv { var items = List<int>(); }",
+      "tag T;",
+      "system S { foreach (var t in others<Inv>(tag: T)) { var n = t.Inv.items.Count; } }",
+      "int main() { return 0; }",
+  }), "reading a snapshot's list is allowed");
+}
+
+KX_TEST(collections_nested_rejected) {
+  Expect::false_(ok({
+      "int main() { var l = List<List<int>>(); return 0; }",
+  }), "nested generics not supported");
+}
+
 int main() { return kxtest::runAll("sema"); }

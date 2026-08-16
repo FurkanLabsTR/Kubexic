@@ -43,6 +43,9 @@ class Codegen {
   void storeTo(const Expr& lhs, llvm::Value* val);
   llvm::Value* toStr(llvm::Value* v, const std::shared_ptr<Type>& t);
   llvm::Value* coerce(llvm::Value* v, llvm::Type* to);
+  llvm::Value* valToI64(llvm::Value* v);
+  llvm::Value* i64ToVal(llvm::Value* v, llvm::Type* ty);
+  int kindCode(const std::shared_ptr<Type>& t);
   llvm::Type* structType(const std::string& name);
 
   void emitSystemFunction(const Decl& d);

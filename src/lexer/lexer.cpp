@@ -254,9 +254,38 @@ Token Lexer::scanString(bool dollar) {
   int startLine = line_;
   advance();
   std::string content;
-  while (!atEnd() && peek() != '"') {
-    char c = advance();
-    if (c == '\\') {
+  int depth = 0;
+  while (!atEnd()) {
+    char c = peek();
+    if (!dollar && c == '"') break;
+    if (dollar) {
+      if (c == '{') {
+        depth++;
+        content += advance();
+        continue;
+      }
+      if (c == '}') {
+        if (depth > 0) depth--;
+        content += advance();
+        continue;
+      }
+      if (c == '"' && depth == 0) break;
+      if (c == '"' && depth > 0) {
+        content += advance();
+        while (!atEnd()) {
+          char q = advance();
+          content += q;
+          if (q == '\\' && !atEnd()) {
+            content += advance();
+            continue;
+          }
+          if (q == '"') break;
+        }
+        continue;
+      }
+    }
+    char nc = advance();
+    if (nc == '\\') {
       if (atEnd()) break;
       char e = advance();
       switch (e) {
@@ -272,7 +301,7 @@ Token Lexer::scanString(bool dollar) {
           content += e;
       }
     } else {
-      content += c;
+      content += nc;
     }
   }
   if (atEnd()) {

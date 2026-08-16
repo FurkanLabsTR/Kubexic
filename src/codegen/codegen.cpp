@@ -41,6 +41,10 @@ std::string typeSig(const std::shared_ptr<Type>& t) {
     case TypeKind::Option: return "opt_" + (t->inner ? typeSig(t->inner) : std::string("?"));
     case TypeKind::Struct: return "struct_" + t->name;
     case TypeKind::Enum: return "enum_" + t->name;
+    case TypeKind::List: return "list_" + (t->inner ? typeSig(t->inner) : std::string("x"));
+    case TypeKind::Map:
+      return "map_" + (t->inner ? typeSig(t->inner) : std::string("x")) + "_" +
+             (t->inner2 ? typeSig(t->inner2) : std::string("x"));
     default: return "x";
   }
 }
@@ -157,8 +161,9 @@ void Codegen::declareEcsRuntime() {
   auto i32 = llvm::Type::getInt32Ty(ctx_);
   auto i64 = llvm::Type::getInt64Ty(ctx_);
   auto f64 = llvm::Type::getDoubleTy(ctx_);
+  auto i1 = llvm::Type::getInt1Ty(ctx_);
   auto ptr = llvm::PointerType::get(ctx_, 0);
-  runtimeFn("kx_init", voidTy, {i32, ptr});
+  runtimeFn("kx_init", voidTy, {i32, ptr, ptr});
   runtimeFn("kx_set_systems", voidTy, {i32, ptr});
   runtimeFn("kx_spawn", i64, {i64});
   runtimeFn("kx_despawn", voidTy, {i64});
@@ -176,6 +181,22 @@ void Codegen::declareEcsRuntime() {
   runtimeFn("kx_snap_read_i64", i64, {i64, i32, i32});
   runtimeFn("kx_snap_read_f64", f64, {i64, i32, i32});
   runtimeFn("kx_snap_read_str", ptr, {i64, i32, i32});
+  runtimeFn("kx_list_new", i64, {i32});
+  runtimeFn("kx_list_add", voidTy, {i64, i64});
+  runtimeFn("kx_list_get", i64, {i64, i64});
+  runtimeFn("kx_list_set", voidTy, {i64, i64, i64});
+  runtimeFn("kx_list_remove_at", voidTy, {i64, i64});
+  runtimeFn("kx_list_clear", voidTy, {i64});
+  runtimeFn("kx_list_size", i64, {i64});
+  runtimeFn("kx_list_begin", i64, {i64});
+  runtimeFn("kx_list_next", i64, {i64, i64});
+  runtimeFn("kx_map_new", i64, {i32, i32});
+  runtimeFn("kx_map_set", voidTy, {i64, i64, i64});
+  runtimeFn("kx_map_get", i64, {i64, i64});
+  runtimeFn("kx_map_has", i1, {i64, i64});
+  runtimeFn("kx_map_remove", voidTy, {i64, i64});
+  runtimeFn("kx_map_clear", voidTy, {i64});
+  runtimeFn("kx_map_size", i64, {i64});
   runtimeFn("kx_run", voidTy, {i32, i64, f64});
   runtimeFn("kx_stop", voidTy, {});
   runtimeFn("kx_get_dt", f64, {});
@@ -362,15 +383,25 @@ void Codegen::emitInitCalls() {
   auto ptr = llvm::PointerType::get(ctx_, 0);
 
   std::vector<llvm::Constant*> counts;
-  for (const auto& name : compNames_) counts.push_back(
-      llvm::ConstantInt::get(i32, (uint64_t)compFields_[name].size()));
+  std::vector<llvm::Constant*> types;
+  for (const auto& name : compNames_) {
+    counts.push_back(llvm::ConstantInt::get(i32, (uint64_t)compFields_[name].size()));
+    for (size_t fi = 0; fi < compFields_[name].size(); fi++) {
+      types.push_back(llvm::ConstantInt::get(i32, (uint64_t)kindCode(fieldType(name, (int)fi))));
+    }
+  }
   auto countsArrTy = llvm::ArrayType::get(i32, counts.size());
   auto countsGv = new llvm::GlobalVariable(
       *module_, countsArrTy, true, llvm::GlobalValue::InternalLinkage,
       llvm::ConstantArray::get(countsArrTy, counts), "kx_field_counts");
-  auto initFn = runtimeFn("kx_init", llvm::Type::getVoidTy(ctx_), {i32, ptr});
+  auto typesArrTy = llvm::ArrayType::get(i32, types.size());
+  auto typesGv = new llvm::GlobalVariable(
+      *module_, typesArrTy, true, llvm::GlobalValue::InternalLinkage,
+      llvm::ConstantArray::get(typesArrTy, types), "kx_field_types");
+  auto initFn = runtimeFn("kx_init", llvm::Type::getVoidTy(ctx_), {i32, ptr, ptr});
   builder_.CreateCall(initFn, {llvm::ConstantInt::get(i32, (uint64_t)compNames_.size()),
-                               builder_.CreateConstGEP2_32(countsArrTy, countsGv, 0, 0)});
+                               builder_.CreateConstGEP2_32(countsArrTy, countsGv, 0, 0),
+                               builder_.CreateConstGEP2_32(typesArrTy, typesGv, 0, 0)});
 
   if (!systemOrder_.empty()) {
     auto sysTy = llvm::StructType::get(ctx_, {i64, i64, ptr});
@@ -445,6 +476,9 @@ llvm::Type* Codegen::llvmType(const std::shared_ptr<Type>& t) {
     }
     case TypeKind::Struct: return structType(t->name);
     case TypeKind::Enum: return llvm::Type::getInt32Ty(ctx_);
+    case TypeKind::List:
+    case TypeKind::Map:
+      return llvm::Type::getInt64Ty(ctx_);
     default: return llvm::Type::getInt64Ty(ctx_);
   }
 }
@@ -494,6 +528,39 @@ llvm::Value* Codegen::coerce(llvm::Value* v, llvm::Type* to) {
   if (from->isIntegerTy() && to->isFloatingPointTy()) {
     return builder_.CreateSIToFP(v, to);
   }
+  return v;
+}
+
+int Codegen::kindCode(const std::shared_ptr<Type>& t) {
+  if (!t) return 0;
+  if (t->kind == TypeKind::Float || t->kind == TypeKind::Double) return 1;
+  if (t->kind == TypeKind::String) return 2;
+  if (t->isCollection()) return 3;
+  return 0;
+}
+
+llvm::Value* Codegen::valToI64(llvm::Value* v) {
+  auto i64 = llvm::Type::getInt64Ty(ctx_);
+  if (!v) return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
+  if (v->getType() == i64) return v;
+  if (v->getType()->isIntegerTy()) return builder_.CreateSExt(v, i64);
+  if (v->getType()->isFloatingPointTy()) {
+    auto d = builder_.CreateFPExt(v, llvm::Type::getDoubleTy(ctx_));
+    return builder_.CreateBitCast(d, i64);
+  }
+  if (v->getType()->isPointerTy()) return builder_.CreatePtrToInt(v, i64);
+  return v;
+}
+
+llvm::Value* Codegen::i64ToVal(llvm::Value* v, llvm::Type* ty) {
+  if (!v || !ty) return v;
+  if (v->getType() == ty) return v;
+  if (ty->isIntegerTy()) return builder_.CreateTrunc(v, ty);
+  if (ty->isFloatingPointTy()) {
+    auto d = builder_.CreateBitCast(v, llvm::Type::getDoubleTy(ctx_));
+    return builder_.CreateFPTrunc(d, ty);
+  }
+  if (ty->isPointerTy()) return builder_.CreateIntToPtr(v, ty);
   return v;
 }
 
@@ -643,6 +710,19 @@ llvm::Value* Codegen::genExpr(const Expr& e) {
     }
     case Expr::Kind::MemberAccess: {
       Expr* base = e.lhs.get();
+      if (base && base->type && base->type->isCollection()) {
+        auto obj = genExpr(*base);
+        if (e.member == "Count") {
+          auto i64 = llvm::Type::getInt64Ty(ctx_);
+          if (base->type->kind == TypeKind::List) {
+            auto f = runtimeFn("kx_list_size", i64, {i64});
+            return builder_.CreateCall(f, {obj});
+          }
+          auto f = runtimeFn("kx_map_size", i64, {i64});
+          return builder_.CreateCall(f, {obj});
+        }
+        return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
+      }
       if (base && base->kind == Expr::Kind::MemberAccess) {
         Expr* bb = base->lhs.get();
         if (bb && bb->kind == Expr::Kind::Identifier && bb->type &&
@@ -981,6 +1061,22 @@ llvm::Value* Codegen::genCall(const Expr& call) {
       builder_.CreateCall(f, {arg ? arg : builder_.CreateGlobalStringPtr("panic")});
       return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
     }
+    if (name == "List") {
+      auto f = runtimeFn("kx_list_new", llvm::Type::getInt64Ty(ctx_),
+                         {llvm::Type::getInt32Ty(ctx_)});
+      int kind = (call.type && call.type->inner) ? kindCode(call.type->inner) : 0;
+      return builder_.CreateCall(
+          f, {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), kind)});
+    }
+    if (name == "Map") {
+      auto f = runtimeFn("kx_map_new", llvm::Type::getInt64Ty(ctx_),
+                         {llvm::Type::getInt32Ty(ctx_), llvm::Type::getInt32Ty(ctx_)});
+      int kk = (call.type && call.type->inner) ? kindCode(call.type->inner) : 0;
+      int vk = (call.type && call.type->inner2) ? kindCode(call.type->inner2) : 0;
+      return builder_.CreateCall(
+          f, {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), kk),
+              llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), vk)});
+    }
     const Decl* fn = checker_.functionByName(name);
     if (fn) {
       std::vector<std::shared_ptr<Type>> ptypes;
@@ -1076,6 +1172,67 @@ llvm::Value* Codegen::genCall(const Expr& call) {
       return builder_.CreateCall(
           f, {llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0)),
               llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0)});
+    }
+    if (base && base->type && base->type->isCollection()) {
+      llvm::Value* obj = genExpr(*base);
+      auto i64 = llvm::Type::getInt64Ty(ctx_);
+      const std::string& m = member;
+      if (base->type->kind == TypeKind::List) {
+        if (m == "Add") {
+          auto f = runtimeFn("kx_list_add", llvm::Type::getVoidTy(ctx_), {i64, i64});
+          builder_.CreateCall(f, {obj, valToI64(genExpr(*call.args[0].value))});
+          return nullptr;
+        }
+        if (m == "Get") {
+          auto f = runtimeFn("kx_list_get", i64, {i64, i64});
+          auto v = builder_.CreateCall(f, {obj, valToI64(genExpr(*call.args[0].value))});
+          return i64ToVal(v, llvmType(base->type->inner));
+        }
+        if (m == "Set") {
+          auto f = runtimeFn("kx_list_set", llvm::Type::getVoidTy(ctx_), {i64, i64, i64});
+          builder_.CreateCall(f, {obj, valToI64(genExpr(*call.args[0].value)),
+                                  valToI64(genExpr(*call.args[1].value))});
+          return nullptr;
+        }
+        if (m == "RemoveAt") {
+          auto f = runtimeFn("kx_list_remove_at", llvm::Type::getVoidTy(ctx_), {i64, i64});
+          builder_.CreateCall(f, {obj, valToI64(genExpr(*call.args[0].value))});
+          return nullptr;
+        }
+        if (m == "Clear") {
+          auto f = runtimeFn("kx_list_clear", llvm::Type::getVoidTy(ctx_), {i64});
+          builder_.CreateCall(f, {obj});
+          return nullptr;
+        }
+      }
+      if (base->type->kind == TypeKind::Map) {
+        if (m == "Set") {
+          auto f = runtimeFn("kx_map_set", llvm::Type::getVoidTy(ctx_), {i64, i64, i64});
+          builder_.CreateCall(f, {obj, valToI64(genExpr(*call.args[0].value)),
+                                  valToI64(genExpr(*call.args[1].value))});
+          return nullptr;
+        }
+        if (m == "Get") {
+          auto f = runtimeFn("kx_map_get", i64, {i64, i64});
+          auto v = builder_.CreateCall(f, {obj, valToI64(genExpr(*call.args[0].value))});
+          return i64ToVal(v, llvmType(base->type->inner2));
+        }
+        if (m == "Has") {
+          auto f = runtimeFn("kx_map_has", llvm::Type::getInt1Ty(ctx_), {i64, i64});
+          return builder_.CreateCall(f, {obj, valToI64(genExpr(*call.args[0].value))});
+        }
+        if (m == "Remove") {
+          auto f = runtimeFn("kx_map_remove", llvm::Type::getVoidTy(ctx_), {i64, i64});
+          builder_.CreateCall(f, {obj, valToI64(genExpr(*call.args[0].value))});
+          return nullptr;
+        }
+        if (m == "Clear") {
+          auto f = runtimeFn("kx_map_clear", llvm::Type::getVoidTy(ctx_), {i64});
+          builder_.CreateCall(f, {obj});
+          return nullptr;
+        }
+      }
+      return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
     }
     if (base) genExpr(*base);
     return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
@@ -1173,6 +1330,42 @@ void Codegen::genStmt(const Stmt& s) {
       return;
     }
     case Stmt::Kind::Foreach: {
+      if (s.container && s.container->type &&
+          s.container->type->kind == TypeKind::List) {
+        auto handle = genExpr(*s.container);
+        auto elemTy = llvmType(s.container->type->inner);
+        auto fn = curFn_;
+        auto varAlloca = builder_.CreateAlloca(elemTy);
+        auto idxAlloca = builder_.CreateAlloca(llvm::Type::getInt64Ty(ctx_));
+        auto beginFn = runtimeFn("kx_list_begin", llvm::Type::getInt64Ty(ctx_),
+                                 {llvm::Type::getInt64Ty(ctx_)});
+        builder_.CreateStore(builder_.CreateCall(beginFn, {handle}), idxAlloca);
+        auto condBlock = llvm::BasicBlock::Create(ctx_, "li.cond", fn);
+        auto bodyBlock = llvm::BasicBlock::Create(ctx_, "li.body", fn);
+        auto exitBlock = llvm::BasicBlock::Create(ctx_, "li.exit", fn);
+        builder_.CreateBr(condBlock);
+        builder_.SetInsertPoint(condBlock);
+        auto idx = builder_.CreateLoad(llvm::Type::getInt64Ty(ctx_), idxAlloca);
+        auto done = builder_.CreateICmpEQ(
+            idx, llvm::ConstantInt::get(ctx_, llvm::APInt(64, (uint64_t)-1)));
+        builder_.CreateCondBr(done, exitBlock, bodyBlock);
+        builder_.SetInsertPoint(bodyBlock);
+        auto getFn = runtimeFn("kx_list_get", llvm::Type::getInt64Ty(ctx_),
+                               {llvm::Type::getInt64Ty(ctx_), llvm::Type::getInt64Ty(ctx_)});
+        auto raw = builder_.CreateCall(getFn, {handle, idx});
+        builder_.CreateStore(i64ToVal(raw, elemTy), varAlloca);
+        locals_[s.varName] = varAlloca;
+        loops_.push_back({condBlock, exitBlock});
+        genStmt(*s.bodyStmt);
+        loops_.pop_back();
+        auto nextFn = runtimeFn("kx_list_next", llvm::Type::getInt64Ty(ctx_),
+                                {llvm::Type::getInt64Ty(ctx_), llvm::Type::getInt64Ty(ctx_)});
+        auto nxt = builder_.CreateCall(nextFn, {handle, idx});
+        builder_.CreateStore(nxt, idxAlloca);
+        maybeBr(builder_, condBlock);
+        builder_.SetInsertPoint(exitBlock);
+        return;
+      }
       std::string tag;
       bool exact = false;
       uint64_t mask = 0;

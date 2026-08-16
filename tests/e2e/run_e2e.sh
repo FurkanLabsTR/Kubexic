@@ -105,5 +105,24 @@ fi
 PASS=$((PASS + 1))
 echo "e2e arrow (spatial library, 1 box == 8 boxes): PASS"
 
-echo "e2e: $PASS/6 checks passed"
+./build/kxc build samples/collections build/e2e_coll
+COLL1=$(KUBEXIC_CORES=1 timeout 10 ./build/e2e_coll)
+COLL8=$(KUBEXIC_CORES=8 timeout 10 ./build/e2e_coll)
+EXPECTED="tick 5: count=6 iterated=6 first=item-0 hits=4
+tick 7: items=2 hasHits=false
+collections demo done"
+if [ "$COLL1" != "$EXPECTED" ]; then
+  echo "e2e collections: FAIL"
+  echo "--- expected ---"; echo "$EXPECTED"
+  echo "--- got ---"; echo "$COLL1"
+  exit 1
+fi
+if [ "$COLL8" != "$COLL1" ]; then
+  echo "e2e collections: FAIL (multi-box differs)"
+  exit 1
+fi
+PASS=$((PASS + 1))
+echo "e2e collections (List/Map, 1 box == 8 boxes): PASS"
+
+echo "e2e: $PASS/7 checks passed"
 exit 0

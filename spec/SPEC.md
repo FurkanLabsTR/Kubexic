@@ -417,7 +417,19 @@ int main() {
 
 ### 13.2 Collections, math, rng
 
-- `List<T>`, `Map<K,V>`, `Set<T>` — heap data usable inside components.
+- `List<T>` — `Add(x)`, `Get(i)`, `Set(i, x)`, `RemoveAt(i)`, `Clear()`, `Count`
+  (property), `foreach` iterates elements.
+- `Map<K, V>` — `Set(k, v)` (upsert), `Get(k)`, `Has(k)`, `Remove(k)`, `Clear()`,
+  `Count` (property).
+- Element types: `int`, `long`, `float`, `double`, `bool`, `string`, `EntityId`.
+  Nested collections are not supported yet.
+- Constructed with `List<int>()`, `Map<string, int>()`.
+- Ownership semantics (ownership trees): a collection stored in a component
+  field belongs to that entity — deep-copied when written to a field or frozen
+  into the bulletin board, and freed when the entity despawns or the component
+  is detached. Mutating a collection read through a **frozen snapshot** is a
+  compile error; reads (`Count`, `Get`, `Has`) are allowed.
+- Out-of-range `Get`/`Set`/`RemoveAt` and missing `Map.Get` keys `panic`.
 - `Vec2`/`Vec3`/`Vec4` structs; math functions (`sqrt`, `sin`, `cos`, `pow`, `min`, `max`,
   `clamp`, `lerp`).
 - `std.rng(seed)` — deterministic seeded RNG; same sequence on every machine. Seeds per entity
@@ -596,8 +608,8 @@ No tag query in the program → no tag machinery emitted (§10 zero-cost).
 | M6 multi-box | done | parallel boxes (pthreads), deterministic routing, core-count invariance proven (1 box == 8 boxes, byte-identical) |
 | M7 migration | done | deterministic rebalancing; migration is semantically invisible (frozen iteration sorted by entity ID) |
 | M8 stdlib v1 | done | kx.spatial (Pos3, Spatial tag, `spatial.Overlap/Nearby` with inline distance filter), arrow demo |
-| collections (`List`/`Map`) | planned | needed for the spatial grid index |
-| kx.spatial grid index | planned | replace O(N) distance scan with a hash grid once collections land |
+| collections | done | `List<T>` / `Map<K,V>` with ownership-tree semantics (deep copy, free on despawn), foreach over lists, frozen-snapshot mutation rejected at compile time |
+| kx.spatial grid index | planned | replace O(N) distance scan with a hash grid (needs nothing new — collections now exist) |
 
 Core guarantees verified end-to-end:
 - **Zero data races** — live data only touched by the owning box; others always read the frozen view

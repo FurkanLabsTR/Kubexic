@@ -1,0 +1,21 @@
+// InventorySystem.kx — exercises List and Map methods + iteration
+system InventorySystem {
+    Inventory.items.Add($"item-{tick}");
+    if (tick < 5) {
+        Inventory.stats.Set("hits", tick);
+    }
+    if (tick == 5) {
+        var total = 0;
+        foreach (var it in Inventory.items) {
+            total += 1;
+        }
+        var first = Inventory.items.Get(0);
+        std.println($"tick {tick}: count={Inventory.items.Count} iterated={total} first={first} hits={Inventory.stats.Get("hits")}");
+        Inventory.items.Clear();
+        Inventory.stats.Remove("hits");
+    }
+    if (tick == 7) {
+        var hasHits = Inventory.stats.Has("hits");
+        std.println($"tick {tick}: items={Inventory.items.Count} hasHits={hasHits}");
+    }
+}

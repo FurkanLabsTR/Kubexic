@@ -22,6 +22,8 @@ enum class TypeKind {
   Enum,
   Function,
   Snapshot,
+  List,
+  Map,
   Self,
   Generic,
   Unknown,
@@ -32,6 +34,7 @@ struct Type {
   TypeKind kind = TypeKind::Unknown;
   std::string name;
   std::shared_ptr<Type> inner;
+  std::shared_ptr<Type> inner2;
   std::shared_ptr<Type> ret;
   std::vector<std::shared_ptr<Type>> params;
   std::vector<std::string> componentNames;
@@ -42,10 +45,13 @@ struct Type {
   static std::shared_ptr<Type> enumType(const std::string& name);
   static std::shared_ptr<Type> option(std::shared_ptr<Type> inner);
   static std::shared_ptr<Type> snapshot(std::vector<std::string> components);
+  static std::shared_ptr<Type> list(std::shared_ptr<Type> inner);
+  static std::shared_ptr<Type> map(std::shared_ptr<Type> key, std::shared_ptr<Type> val);
 
   bool isNumeric() const;
   bool isError() const;
   bool isUnknownish() const;
+  bool isCollection() const;
   std::string describe() const;
 };
 

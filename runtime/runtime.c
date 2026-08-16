@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +15,286 @@
 #define KX_BUF_CAP 4096
 
 typedef long long kx_entity;
+
+void kx_panic(const char* msg);
+
+/* ---- collections (ownership trees: never shared, deep-copied) ---- */
+
+#define KX_COLLECTION_LIST 1
+#define KX_COLLECTION_MAP 2
+#define KX_KIND_I64 0
+#define KX_KIND_F64 1
+#define KX_KIND_STR 2
+#define KX_KIND_COLL 3
+
+typedef struct {
+  int kind;
+} kx_collection;
+
+typedef struct {
+  int kind;
+  long long* data;
+  long long size;
+  long long cap;
+  int elemKind;
+} kx_vec;
+
+typedef struct {
+  int kind;
+  long long* keys;
+  long long* vals;
+  long long size;
+  long long cap;
+  int keyKind;
+  int valKind;
+} kx_map;
+
+static kx_vec* vecOf(long long h) { return h ? (kx_vec*)(uintptr_t)h : NULL; }
+
+static kx_map* mapOf(long long h) { return h ? (kx_map*)(uintptr_t)h : NULL; }
+
+long long kx_list_new(int elemKind) {
+  kx_vec* v = (kx_vec*)calloc(1, sizeof(kx_vec));
+  v->kind = KX_COLLECTION_LIST;
+  v->cap = 8;
+  v->data = (long long*)calloc(v->cap, 8);
+  v->elemKind = elemKind;
+  return (long long)(uintptr_t)v;
+}
+
+void kx_list_add(long long h, long long val) {
+  kx_vec* v = vecOf(h);
+  if (!v) return;
+  if (v->size >= v->cap) {
+    v->cap *= 2;
+    v->data = (long long*)realloc(v->data, v->cap * 8);
+  }
+  v->data[v->size++] = val;
+}
+
+long long kx_list_get(long long h, long long i) {
+  kx_vec* v = vecOf(h);
+  if (!v || i < 0 || i >= v->size) kx_panic("List.Get: index out of range");
+  return v->data[i];
+}
+
+void kx_list_set(long long h, long long i, long long val) {
+  kx_vec* v = vecOf(h);
+  if (!v || i < 0 || i >= v->size) kx_panic("List.Set: index out of range");
+  v->data[i] = val;
+}
+
+void kx_list_remove_at(long long h, long long i) {
+  kx_vec* v = vecOf(h);
+  if (!v) return;
+  if (i < 0 || i >= v->size) kx_panic("List.RemoveAt: index out of range");
+  for (long long j = i; j + 1 < v->size; j++) v->data[j] = v->data[j + 1];
+  v->size--;
+}
+
+void kx_list_clear(long long h) {
+  kx_vec* v = vecOf(h);
+  if (!v) return;
+  v->size = 0;
+}
+
+long long kx_list_size(long long h) {
+  kx_vec* v = vecOf(h);
+  return v ? v->size : 0;
+}
+
+long long kx_list_begin(long long h) {
+  kx_vec* v = vecOf(h);
+  return (v && v->size > 0) ? 0 : -1;
+}
+
+long long kx_list_next(long long h, long long i) {
+  kx_vec* v = vecOf(h);
+  if (!v || i < 0) return -1;
+  return (i + 1 < v->size) ? i + 1 : -1;
+}
+
+static unsigned long long mix64(unsigned long long x) {
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+  return x ^ (x >> 31);
+}
+
+static unsigned long long hashKey(const kx_map* m, long long k) {
+  if (m->keyKind == KX_KIND_STR) {
+    const unsigned char* s = (const unsigned char*)(uintptr_t)k;
+    unsigned long long h = 1469598103934665603ull;
+    if (s) {
+      for (; *s; s++) {
+        h ^= *s;
+        h *= 1099511628211ull;
+      }
+    }
+    return h;
+  }
+  return mix64((unsigned long long)k);
+}
+
+static int keyEq(const kx_map* m, long long a, long long b) {
+  if (m->keyKind == KX_KIND_STR) {
+    if (a == b) return 1;
+    const char* x = (const char*)(uintptr_t)a;
+    const char* y = (const char*)(uintptr_t)b;
+    return x && y && strcmp(x, y) == 0;
+  }
+  return a == b;
+}
+
+static void mapGrow(kx_map* m) {
+  long long newCap = m->cap ? m->cap * 2 : 8;
+  long long* newKeys = (long long*)calloc(newCap, 8);
+  long long* newVals = (long long*)calloc(newCap, 8);
+  for (long long i = 0; i < m->cap; i++) {
+    if (m->keys[i] == 0) continue;
+    long long j = hashKey(m, m->keys[i]) & (newCap - 1);
+    while (newKeys[j] != 0) j = (j + 1) & (newCap - 1);
+    newKeys[j] = m->keys[i];
+    newVals[j] = m->vals[i];
+  }
+  free(m->keys);
+  free(m->vals);
+  m->keys = newKeys;
+  m->vals = newVals;
+  m->cap = newCap;
+}
+
+long long kx_map_new(int keyKind, int valKind) {
+  kx_map* m = (kx_map*)calloc(1, sizeof(kx_map));
+  m->kind = KX_COLLECTION_MAP;
+  m->cap = 8;
+  m->keys = (long long*)calloc(m->cap, 8);
+  m->vals = (long long*)calloc(m->cap, 8);
+  m->keyKind = keyKind;
+  m->valKind = valKind;
+  return (long long)(uintptr_t)m;
+}
+
+void kx_map_set(long long h, long long key, long long val) {
+  kx_map* m = mapOf(h);
+  if (!m) return;
+  if ((m->size + 1) * 10 >= m->cap * 7) mapGrow(m);
+  long long i = hashKey(m, key) & (m->cap - 1);
+  while (m->keys[i] != 0 && !keyEq(m, m->keys[i], key)) i = (i + 1) & (m->cap - 1);
+  if (m->keys[i] == 0) {
+    m->keys[i] = key;
+    m->size++;
+  }
+  m->vals[i] = val;
+}
+
+long long kx_map_get(long long h, long long key) {
+  kx_map* m = mapOf(h);
+  if (!m) kx_panic("Map.Get: null map");
+  long long i = hashKey(m, key) & (m->cap - 1);
+  while (m->keys[i] != 0) {
+    if (keyEq(m, m->keys[i], key)) return m->vals[i];
+    i = (i + 1) & (m->cap - 1);
+  }
+  kx_panic("Map.Get: key not found");
+  return 0;
+}
+
+int kx_map_has(long long h, long long key) {
+  kx_map* m = mapOf(h);
+  if (!m) return 0;
+  long long i = hashKey(m, key) & (m->cap - 1);
+  while (m->keys[i] != 0) {
+    if (keyEq(m, m->keys[i], key)) return 1;
+    i = (i + 1) & (m->cap - 1);
+  }
+  return 0;
+}
+
+void kx_map_remove(long long h, long long key) {
+  kx_map* m = mapOf(h);
+  if (!m) return;
+  long long i = hashKey(m, key) & (m->cap - 1);
+  while (m->keys[i] != 0) {
+    if (keyEq(m, m->keys[i], key)) {
+      m->keys[i] = 0;
+      m->vals[i] = 0;
+      m->size--;
+      return;
+    }
+    i = (i + 1) & (m->cap - 1);
+  }
+}
+
+void kx_map_clear(long long h) {
+  kx_map* m = mapOf(h);
+  if (!m) return;
+  memset(m->keys, 0, m->cap * 8);
+  memset(m->vals, 0, m->cap * 8);
+  m->size = 0;
+}
+
+long long kx_map_size(long long h) {
+  kx_map* m = mapOf(h);
+  return m ? m->size : 0;
+}
+
+static long long copyHandle(long long h, int kind);
+static void freeHandle(long long h);
+
+static long long copyHandle(long long h, int kind) {
+  if (!h) return 0;
+  (void)kind;
+  kx_collection* c = (kx_collection*)(uintptr_t)h;
+  if (c->kind == KX_COLLECTION_LIST) {
+    kx_vec* v = (kx_vec*)h;
+    long long nh = kx_list_new(v->elemKind);
+    kx_vec* nv = vecOf(nh);
+    while (nv->cap < v->size) {
+      nv->cap *= 2;
+      nv->data = (long long*)realloc(nv->data, nv->cap * 8);
+    }
+    for (long long i = 0; i < v->size; i++) {
+      nv->data[i] = v->elemKind == KX_KIND_COLL ? copyHandle(v->data[i], 3) : v->data[i];
+    }
+    nv->size = v->size;
+    return nh;
+  }
+  if (c->kind == KX_COLLECTION_MAP) {
+    kx_map* m = (kx_map*)h;
+    long long nh = kx_map_new(m->keyKind, m->valKind);
+    for (long long i = 0; i < m->cap; i++) {
+      if (m->keys[i] == 0) continue;
+      long long k = m->keyKind == KX_KIND_COLL ? copyHandle(m->keys[i], 3) : m->keys[i];
+      long long vv = m->valKind == KX_KIND_COLL ? copyHandle(m->vals[i], 3) : m->vals[i];
+      kx_map_set(nh, k, vv);
+    }
+    return nh;
+  }
+  return h;
+}
+
+static void freeHandle(long long h) {
+  if (!h) return;
+  kx_collection* c = (kx_collection*)(uintptr_t)h;
+  if (c->kind == KX_COLLECTION_LIST) {
+    kx_vec* v = (kx_vec*)h;
+    if (v->elemKind == KX_KIND_COLL) {
+      for (long long i = 0; i < v->size; i++) freeHandle(v->data[i]);
+    }
+    free(v->data);
+    free(v);
+  } else if (c->kind == KX_COLLECTION_MAP) {
+    kx_map* m = (kx_map*)h;
+    for (long long i = 0; i < m->cap; i++) {
+      if (m->keys[i] == 0) continue;
+      if (m->keyKind == KX_KIND_COLL) freeHandle(m->keys[i]);
+      if (m->valKind == KX_KIND_COLL) freeHandle(m->vals[i]);
+    }
+    free(m->keys);
+    free(m->vals);
+    free(m);
+  }
+}
 
 /* ---- request queue (deterministic cross-box mutation) ---- */
 
@@ -56,6 +337,7 @@ typedef struct {
 
 static int g_compCount;
 static int g_fieldCounts[KX_MAX_COMPONENTS];
+static int g_fieldTypes[KX_MAX_COMPONENTS * KX_MAX_FIELDS];
 static int g_boxCount = 1;
 static kx_box* g_boxes;
 
@@ -309,9 +591,26 @@ static void applyRequest(kx_entity e, const kx_req* r) {
       ((char**)b->fFields[r->comp * KX_MAX_FIELDS + r->field])[slot] = (char*)r->v;
       break;
     case REQ_DETACH:
+      for (int f = 0; f < g_fieldCounts[r->comp]; f++) {
+        if (g_fieldTypes[r->comp * KX_MAX_FIELDS + f] == KX_KIND_COLL) {
+          long long h = ((long long*)b->fFields[r->comp * KX_MAX_FIELDS + f])[slot];
+          freeHandle(h);
+          ((long long*)b->fFields[r->comp * KX_MAX_FIELDS + f])[slot] = 0;
+        }
+      }
       b->compMasks[slot] &= ~(1LL << r->comp);
       break;
     case REQ_DESPAWN: {
+      for (int c = 0; c < g_compCount; c++) {
+        if (!(b->compMasks[slot] & (1LL << c))) continue;
+        for (int f = 0; f < g_fieldCounts[c]; f++) {
+          if (g_fieldTypes[c * KX_MAX_FIELDS + f] == KX_KIND_COLL) {
+            long long h = ((long long*)b->fFields[c * KX_MAX_FIELDS + f])[slot];
+            freeHandle(h);
+            ((long long*)b->fFields[c * KX_MAX_FIELDS + f])[slot] = 0;
+          }
+        }
+      }
       b->gens[slot] = (b->gens[slot] + 1) & 0xFFFF;
       if (b->gens[slot] == 0) b->gens[slot] = 1;
       b->tagMasks[slot] = 0;
@@ -332,9 +631,14 @@ static void commitBox(kx_box* b) {
 
 /* ---- public API ---- */
 
-void kx_init(int compCount, const int* fieldCounts) {
+void kx_init(int compCount, const int* fieldCounts, const int* fieldTypes) {
   g_compCount = compCount < KX_MAX_COMPONENTS ? compCount : KX_MAX_COMPONENTS;
-  for (int c = 0; c < g_compCount; c++) g_fieldCounts[c] = fieldCounts[c];
+  for (int c = 0; c < g_compCount; c++) {
+    g_fieldCounts[c] = fieldCounts[c];
+    for (int f = 0; f < g_fieldCounts[c] && f < KX_MAX_FIELDS; f++) {
+      g_fieldTypes[c * KX_MAX_FIELDS + f] = fieldTypes[c * KX_MAX_FIELDS + f];
+    }
+  }
 }
 
 void kx_set_systems(int count, const void* table) {
@@ -429,7 +733,13 @@ void kx_comp_write_i64(kx_entity e, int comp, int field, long long v) {
   long long slot;
   if (!resolve(e, &b, &slot)) return;
   if (comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp]) return;
-  ((long long*)b->fFields[comp * KX_MAX_FIELDS + field])[slot] = v;
+  long long* dst = (long long*)b->fFields[comp * KX_MAX_FIELDS + field];
+  if (g_fieldTypes[comp * KX_MAX_FIELDS + field] == KX_KIND_COLL) {
+    freeHandle(dst[slot]);
+    dst[slot] = copyHandle(v, 3);
+    return;
+  }
+  dst[slot] = v;
 }
 
 double kx_comp_read_f64(kx_entity e, int comp, int field) {
@@ -478,8 +788,13 @@ static void freezeBox(kx_box* b) {
     for (int c = 0; c < g_compCount; c++) {
       if (!(cm & (1LL << c))) continue;
       for (int f = 0; f < g_fieldCounts[c]; f++) {
-        memcpy((char*)b->fFields[c * KX_MAX_FIELDS + f] + fs * 8,
-               (char*)b->fFields[c * KX_MAX_FIELDS + f] + slot * 8, 8);
+        long long* src = (long long*)b->fFields[c * KX_MAX_FIELDS + f];
+        long long* dst = (long long*)b->fFields[c * KX_MAX_FIELDS + f];
+        if (g_fieldTypes[c * KX_MAX_FIELDS + f] == KX_KIND_COLL) {
+          dst[fs] = copyHandle(src[slot], 3);
+        } else {
+          dst[fs] = src[slot];
+        }
       }
     }
     fs++;
@@ -632,8 +947,13 @@ static void migrateEntity(kx_box* from, long long slot, kx_box* to) {
   for (int c = 0; c < g_compCount; c++) {
     if (!(cm & (1LL << c))) continue;
     for (int f = 0; f < g_fieldCounts[c]; f++) {
-      memcpy((char*)to->fFields[c * KX_MAX_FIELDS + f] + nslot * 8,
-             (char*)from->fFields[c * KX_MAX_FIELDS + f] + slot * 8, 8);
+      long long* fs = (long long*)from->fFields[c * KX_MAX_FIELDS + f];
+      long long* ts = (long long*)to->fFields[c * KX_MAX_FIELDS + f];
+      if (g_fieldTypes[c * KX_MAX_FIELDS + f] == KX_KIND_COLL) {
+        ts[nslot] = copyHandle(fs[slot], 3);
+      } else {
+        ts[nslot] = fs[slot];
+      }
     }
   }
   kx_entity id = ((kx_entity)(from - g_boxes) << 48) | (slot << 16) | from->gens[slot];
