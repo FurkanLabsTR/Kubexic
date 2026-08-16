@@ -48,6 +48,8 @@ class Codegen {
   int kindCode(const std::shared_ptr<Type>& t);
   llvm::Type* structType(const std::string& name);
 
+  llvm::Function* ensureFunction(const Decl& d,
+                                const std::vector<std::shared_ptr<Type>>& paramTypes);
   void emitSystemFunction(const Decl& d);
   void emitInitCalls();
   void declareEcsRuntime();

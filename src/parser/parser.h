@@ -52,6 +52,7 @@ class Parser {
   StmtPtr parseFor();
   StmtPtr parseForeach();
   StmtPtr parseReturn();
+  StmtPtr parseSwitch();
   StmtPtr parseAttach();
   StmtPtr parseDetach();
   StmtPtr parseDespawn();

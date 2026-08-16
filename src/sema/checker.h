@@ -21,7 +21,7 @@ class Checker {
   const std::map<std::string, const Decl*>& tags() const { return tags_; }
   const std::map<std::string, const Decl*>& structs() const { return structs_; }
   const std::map<std::string, const Decl*>& enums() const { return enums_; }
-  const Decl* functionByName(const std::string& name) const;
+  const Decl* functionByName(const std::string& name, size_t arity = 0) const;
   bool constValue(const std::string& name, ConstValue* out) const;
   std::shared_ptr<Type> reInferBody(const std::vector<StmtPtr>& body,
                                     const std::map<std::string, std::shared_ptr<Type>>& params);
@@ -39,7 +39,7 @@ class Checker {
   std::map<std::string, const Decl*> structs_;
   std::map<std::string, const Decl*> enums_;
   std::map<std::string, ConstValue> consts_;
-  std::map<std::string, const Decl*> functions_;
+  std::map<std::string, std::vector<const Decl*>> functions_;
   std::map<std::string, std::map<std::string, std::shared_ptr<Type>>> componentFields_;
   std::map<std::string, std::map<std::string, std::shared_ptr<Type>>> structFields_;
 
@@ -52,6 +52,7 @@ class Checker {
   bool inSystem_ = false;
   bool mainSeen_ = false;
   int loopDepth_ = 0;
+  int switchDepth_ = 0;
 
   void error(const SourceLoc& loc, const std::string& msg);
   void declare(const Decl& d);

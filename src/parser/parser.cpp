@@ -65,6 +65,7 @@ const char* declKindName(Decl::Kind k) {
 
 const char* stmtKindName(Stmt::Kind k) {
   switch (k) {
+    case Stmt::Kind::Switch: return "switch";
     case Stmt::Kind::Block: return "block";
     case Stmt::Kind::VarDecl: return "vardecl";
     case Stmt::Kind::Expr: return "expr";
@@ -202,6 +203,20 @@ void dumpExpr(const Expr& e, std::ostream& out) {
 void dumpStmt(const Stmt& s, std::ostream& out) {
   out << "(" << stmtKindName(s.kind);
   switch (s.kind) {
+    case Stmt::Kind::Switch:
+      out << " ";
+      dumpExpr(*s.cond, out);
+      for (const auto& c : s.switchCases) {
+        out << " (";
+        for (const auto& v : c.values) {
+          out << " case ";
+          dumpExpr(*v, out);
+        }
+        out << " ";
+        dumpStmt(*c.body, out);
+        out << ")";
+      }
+      break;
     case Stmt::Kind::Block:
       for (const auto& st : s.body) {
         out << " ";
@@ -674,6 +689,7 @@ StmtPtr Parser::parseStatement() {
     case TokenKind::KwFor: return parseFor();
     case TokenKind::KwForeach: return parseForeach();
     case TokenKind::KwReturn: return parseReturn();
+    case TokenKind::KwSwitch: return parseSwitch();
     case TokenKind::KwBreak: {
       auto s = std::make_unique<Stmt>();
       s->kind = Stmt::Kind::Break;
@@ -801,6 +817,51 @@ StmtPtr Parser::parseReturn() {
   advance();
   if (!check(TokenKind::Semi)) s->value = parseExpression();
   expect(TokenKind::Semi, "';' after return");
+  return s;
+}
+
+StmtPtr Parser::parseSwitch() {
+  auto s = std::make_unique<Stmt>();
+  s->kind = Stmt::Kind::Switch;
+  s->loc = SourceLoc{peek().line, peek().col};
+  advance();
+  if (expect(TokenKind::LParen, "'(' after switch")) {
+    s->cond = parseExpression();
+    expect(TokenKind::RParen, "')' after switch condition");
+  }
+  if (!expect(TokenKind::LBrace, "'{' to start switch")) return s;
+  bool sawDefault = false;
+  while (!check(TokenKind::RBrace) && !check(TokenKind::Eof)) {
+    Stmt::SwitchCase sc;
+    if (check(TokenKind::KwCase)) {
+      while (match(TokenKind::KwCase)) {
+        sc.values.push_back(parseExpression());
+        if (!match(TokenKind::Comma)) break;
+      }
+      if (!expect(TokenKind::Colon, "':' after case value")) return s;
+    } else if (check(TokenKind::KwDefault)) {
+      if (sawDefault) {
+        errorHere("duplicate 'default' in switch");
+        return s;
+      }
+      sawDefault = true;
+      advance();
+      if (!expect(TokenKind::Colon, "':' after default")) return s;
+    } else {
+      errorHere("expected 'case' or 'default' in switch");
+      return s;
+    }
+    auto block = std::make_unique<Stmt>();
+    block->kind = Stmt::Kind::Block;
+    block->loc = SourceLoc{peek().line, peek().col};
+    while (!check(TokenKind::KwCase) && !check(TokenKind::KwDefault) &&
+           !check(TokenKind::RBrace) && !check(TokenKind::Eof)) {
+      block->body.push_back(parseStatement());
+    }
+    sc.body = std::move(block);
+    s->switchCases.push_back(std::move(sc));
+  }
+  expect(TokenKind::RBrace, "'}' to close switch");
   return s;
 }
 

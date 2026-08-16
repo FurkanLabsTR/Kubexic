@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1224,6 +1225,67 @@ char* kx_str_cat(const char* a, const char* b) {
   if (p) {
     memcpy(p, a, na);
     memcpy(p + na, b, nb + 1);
+  }
+  return p;
+}
+
+int kx_str_eq(const char* a, const char* b) {
+  if (a == b) return 1;
+  if (!a || !b) return 0;
+  return strcmp(a, b) == 0;
+}
+
+long long kx_str_len(const char* s) { return s ? (long long)strlen(s) : 0; }
+
+char* kx_str_substr(const char* s, long long start, long long len) {
+  if (!s || start < 0 || len < 0) return kx_dup("");
+  long long n = (long long)strlen(s);
+  if (start > n) return kx_dup("");
+  if (start + len > n) len = n - start;
+  char* p = (char*)malloc((size_t)len + 1);
+  if (p) {
+    memcpy(p, s + start, (size_t)len);
+    p[len] = '\0';
+  }
+  return p;
+}
+
+int kx_str_contains(const char* a, const char* b) {
+  if (!a || !b) return 0;
+  return strstr(a, b) != NULL;
+}
+
+int kx_str_starts_with(const char* a, const char* b) {
+  if (!a || !b) return 0;
+  size_t nb = strlen(b);
+  return strncmp(a, b, nb) == 0;
+}
+
+int kx_str_ends_with(const char* a, const char* b) {
+  if (!a || !b) return 0;
+  size_t na = strlen(a), nb = strlen(b);
+  if (nb > na) return 0;
+  return memcmp(a + na - nb, b, nb) == 0;
+}
+
+char* kx_str_upper(const char* s) {
+  if (!s) return kx_dup("");
+  size_t n = strlen(s);
+  char* p = (char*)malloc(n + 1);
+  if (p) {
+    for (size_t i = 0; i < n; i++) p[i] = (char)toupper((unsigned char)s[i]);
+    p[n] = '\0';
+  }
+  return p;
+}
+
+char* kx_str_lower(const char* s) {
+  if (!s) return kx_dup("");
+  size_t n = strlen(s);
+  char* p = (char*)malloc(n + 1);
+  if (p) {
+    for (size_t i = 0; i < n; i++) p[i] = (char)tolower((unsigned char)s[i]);
+    p[n] = '\0';
   }
   return p;
 }

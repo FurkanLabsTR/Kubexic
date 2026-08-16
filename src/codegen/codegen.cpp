@@ -429,6 +429,25 @@ void Codegen::emitInitCalls() {
   }
 }
 
+llvm::Function* Codegen::ensureFunction(const Decl& d,
+                                         const std::vector<std::shared_ptr<Type>>& paramTypes) {
+  std::string key = mangle(d.name, paramTypes);
+  auto it = specializations_.find(key);
+  if (it != specializations_.end()) return it->second;
+  auto saveBlock = builder_.GetInsertBlock();
+  auto savedLocals = locals_;
+  auto savedFn = curFn_;
+  auto savedRet = curRetType_;
+  auto savedLoops = loops_;
+  emitFunction(d, paramTypes);
+  locals_ = savedLocals;
+  curFn_ = savedFn;
+  curRetType_ = savedRet;
+  loops_ = savedLoops;
+  builder_.SetInsertPoint(saveBlock);
+  return specializations_[key];
+}
+
 void Codegen::emitSystemFunction(const Decl& d) {
   auto voidTy = llvm::Type::getVoidTy(ctx_);
   auto i64 = llvm::Type::getInt64Ty(ctx_);
@@ -710,6 +729,15 @@ llvm::Value* Codegen::genExpr(const Expr& e) {
     }
     case Expr::Kind::MemberAccess: {
       Expr* base = e.lhs.get();
+      if (base && base->type && base->type->kind == TypeKind::String) {
+        auto obj = genExpr(*base);
+        if (e.member == "Length") {
+          auto f = runtimeFn("kx_str_len", llvm::Type::getInt64Ty(ctx_),
+                             {llvm::PointerType::get(ctx_, 0)});
+          return builder_.CreateCall(f, {obj});
+        }
+        return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
+      }
       if (base && base->type && base->type->isCollection()) {
         auto obj = genExpr(*base);
         if (e.member == "Count") {
@@ -815,6 +843,36 @@ llvm::Value* Codegen::genExpr(const Expr& e) {
       }
       auto ltRaw = genExpr(*e.lhs);
       auto rtRaw = genExpr(*e.rhs);
+      if (e.lhs->type && e.rhs->type &&
+          (e.lhs->type->kind == TypeKind::Struct || e.rhs->type->kind == TypeKind::Struct)) {
+        const char* opName = nullptr;
+        switch (e.binOp) {
+          case BinaryOp::Add: opName = "op_add"; break;
+          case BinaryOp::Sub: opName = "op_sub"; break;
+          case BinaryOp::Mul: opName = "op_mul"; break;
+          case BinaryOp::Div: opName = "op_div"; break;
+          case BinaryOp::Mod: opName = "op_mod"; break;
+          case BinaryOp::Eq: opName = "op_eq"; break;
+          case BinaryOp::Ne: opName = "op_ne"; break;
+          case BinaryOp::Lt: opName = "op_lt"; break;
+          case BinaryOp::Le: opName = "op_le"; break;
+          case BinaryOp::Gt: opName = "op_gt"; break;
+          case BinaryOp::Ge: opName = "op_ge"; break;
+          default: break;
+        }
+        if (opName) {
+          const Decl* op = checker_.functionByName(opName, 2);
+          if (op) {
+            std::vector<std::shared_ptr<Type>> ptypes = {e.lhs->type, e.rhs->type};
+            auto opFn = ensureFunction(*op, ptypes);
+            auto retIt = specRetTypes_.find(mangle(opName, ptypes));
+            if (retIt != specRetTypes_.end()) {
+              const_cast<Expr&>(e).type = retIt->second;
+            }
+            return builder_.CreateCall(opFn, {ltRaw, rtRaw});
+          }
+        }
+      }
       if (e.binOp == BinaryOp::Add && e.type && e.type->kind == TypeKind::String) {
         auto f = getRuntime("kx_str_cat");
         if (!f) f = declareRuntime("kx_str_cat", llvm::PointerType::get(ctx_, 0),
@@ -844,6 +902,14 @@ llvm::Value* Codegen::genExpr(const Expr& e) {
         case BinaryOp::Mod: return floating ? builder_.CreateFRem(lt, rt) : builder_.CreateSRem(lt, rt);
         case BinaryOp::Eq:
         case BinaryOp::Ne: {
+          if (e.lhs->type && e.lhs->type->kind == TypeKind::String) {
+            auto f = runtimeFn("kx_str_eq", llvm::Type::getInt1Ty(ctx_),
+                               {llvm::PointerType::get(ctx_, 0),
+                                llvm::PointerType::get(ctx_, 0)});
+            auto eqv = builder_.CreateCall(f, {lt, rt});
+            if (e.binOp == BinaryOp::Ne) return builder_.CreateNot(eqv);
+            return eqv;
+          }
           if (lt->getType()->isFloatingPointTy()) {
             auto p = e.binOp == BinaryOp::Eq ? llvm::CmpInst::FCMP_OEQ : llvm::CmpInst::FCMP_ONE;
             return builder_.CreateFCmp(p, lt, rt);
@@ -1077,7 +1143,7 @@ llvm::Value* Codegen::genCall(const Expr& call) {
           f, {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), kk),
               llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), vk)});
     }
-    const Decl* fn = checker_.functionByName(name);
+    const Decl* fn = checker_.functionByName(name, call.args.size());
     if (fn) {
       std::vector<std::shared_ptr<Type>> ptypes;
       for (const auto& a : call.args) {
@@ -1085,27 +1151,12 @@ llvm::Value* Codegen::genCall(const Expr& call) {
       }
       std::vector<llvm::Value*> argv;
       for (const auto& a : call.args) argv.push_back(genExpr(*a.value));
-      std::string key = mangle(name, ptypes);
-      auto it = specializations_.find(key);
-      if (it == specializations_.end()) {
-        auto saveBlock = builder_.GetInsertBlock();
-        auto savedLocals = locals_;
-        auto savedFn = curFn_;
-        auto savedRet = curRetType_;
-        auto savedLoops = loops_;
-        emitFunction(*fn, ptypes);
-        locals_ = savedLocals;
-        curFn_ = savedFn;
-        curRetType_ = savedRet;
-        loops_ = savedLoops;
-        builder_.SetInsertPoint(saveBlock);
-        it = specializations_.find(key);
-      }
-      auto retIt = specRetTypes_.find(key);
+      auto calleeFn = ensureFunction(*fn, ptypes);
+      auto retIt = specRetTypes_.find(mangle(name, ptypes));
       if (retIt != specRetTypes_.end()) {
         const_cast<Expr&>(call).type = retIt->second;
       }
-      return builder_.CreateCall(it->second, argv);
+      return builder_.CreateCall(calleeFn, argv);
     }
     return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
   }
@@ -1172,6 +1223,38 @@ llvm::Value* Codegen::genCall(const Expr& call) {
       return builder_.CreateCall(
           f, {llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0)),
               llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0)});
+    }
+    if (base && base->type && base->type->kind == TypeKind::String) {
+      llvm::Value* obj = genExpr(*base);
+      auto ptr = llvm::PointerType::get(ctx_, 0);
+      auto i64 = llvm::Type::getInt64Ty(ctx_);
+      const std::string& m = member;
+      if (m == "Substring") {
+        auto f = runtimeFn("kx_str_substr", ptr, {ptr, i64, i64});
+        return builder_.CreateCall(f, {obj, valToI64(genExpr(*call.args[0].value)),
+                                       valToI64(genExpr(*call.args[1].value))});
+      }
+      if (m == "Contains") {
+        auto f = runtimeFn("kx_str_contains", llvm::Type::getInt1Ty(ctx_), {ptr, ptr});
+        return builder_.CreateCall(f, {obj, genExpr(*call.args[0].value)});
+      }
+      if (m == "StartsWith") {
+        auto f = runtimeFn("kx_str_starts_with", llvm::Type::getInt1Ty(ctx_), {ptr, ptr});
+        return builder_.CreateCall(f, {obj, genExpr(*call.args[0].value)});
+      }
+      if (m == "EndsWith") {
+        auto f = runtimeFn("kx_str_ends_with", llvm::Type::getInt1Ty(ctx_), {ptr, ptr});
+        return builder_.CreateCall(f, {obj, genExpr(*call.args[0].value)});
+      }
+      if (m == "Upper") {
+        auto f = runtimeFn("kx_str_upper", ptr, {ptr});
+        return builder_.CreateCall(f, {obj});
+      }
+      if (m == "Lower") {
+        auto f = runtimeFn("kx_str_lower", ptr, {ptr});
+        return builder_.CreateCall(f, {obj});
+      }
+      return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
     }
     if (base && base->type && base->type->isCollection()) {
       llvm::Value* obj = genExpr(*base);
@@ -1512,6 +1595,88 @@ void Codegen::genStmt(const Stmt& s) {
       } else {
         builder_.CreateRetVoid();
       }
+      return;
+    }
+    case Stmt::Kind::Switch: {
+      auto condVal = genExpr(*s.cond);
+      auto condAlloca = builder_.CreateAlloca(condVal->getType());
+      builder_.CreateStore(condVal, condAlloca);
+      auto fn = curFn_;
+      auto exitBlock = llvm::BasicBlock::Create(ctx_, "sw.exit", fn);
+      std::vector<std::pair<const Stmt::SwitchCase*, llvm::BasicBlock*>> cmpBlocks;
+      std::vector<llvm::BasicBlock*> bodyBlocks;
+      llvm::BasicBlock* defaultBlock = nullptr;
+      auto contTarget = loops_.empty() ? nullptr : loops_.back().continueTarget;
+      for (auto& sc : s.switchCases) {
+        if (sc.values.empty()) {
+          defaultBlock = llvm::BasicBlock::Create(ctx_, "sw.default", fn);
+        } else {
+          cmpBlocks.emplace_back(&sc, llvm::BasicBlock::Create(ctx_, "sw.cmp", fn));
+          bodyBlocks.push_back(sc.body && !sc.body->body.empty()
+                                   ? llvm::BasicBlock::Create(ctx_, "sw.body", fn)
+                                   : nullptr);
+        }
+      }
+      llvm::BasicBlock* fallBody = exitBlock;
+      for (size_t i = cmpBlocks.size(); i-- > 0;) {
+        if (bodyBlocks[i]) {
+          fallBody = bodyBlocks[i];
+        } else {
+          bodyBlocks[i] = fallBody;
+        }
+      }
+      if (cmpBlocks.empty()) {
+        builder_.CreateBr(defaultBlock ? defaultBlock : exitBlock);
+      } else {
+        builder_.CreateBr(cmpBlocks[0].second);
+      }
+      for (size_t i = 0; i < cmpBlocks.size(); i++) {
+        const auto& sc = *cmpBlocks[i].first;
+        auto cmpBlk = cmpBlocks[i].second;
+        auto bodyBlk = bodyBlocks[i];
+        builder_.SetInsertPoint(cmpBlk);
+        llvm::Value* matched = nullptr;
+        for (auto& v : sc.values) {
+          auto vv = genExpr(*v);
+          auto cc = builder_.CreateLoad(condAlloca->getAllocatedType(), condAlloca);
+          llvm::Value* eq;
+          if (cc->getType()->isFloatingPointTy()) {
+            eq = builder_.CreateFCmp(llvm::CmpInst::FCMP_OEQ, cc, vv);
+          } else if (cc->getType()->isPointerTy()) {
+            auto f = runtimeFn("kx_str_eq", llvm::Type::getInt1Ty(ctx_),
+                               {llvm::PointerType::get(ctx_, 0),
+                                llvm::PointerType::get(ctx_, 0)});
+            eq = builder_.CreateCall(f, {cc, vv});
+          } else {
+            eq = builder_.CreateICmp(llvm::CmpInst::ICMP_EQ, cc, vv);
+          }
+          matched = matched ? builder_.CreateOr(matched, eq) : eq;
+        }
+        auto next = (i + 1 < cmpBlocks.size()) ? cmpBlocks[i + 1].second
+                     : (defaultBlock ? defaultBlock : exitBlock);
+        builder_.CreateCondBr(matched, bodyBlk, next);
+      }
+      if (defaultBlock) {
+        builder_.SetInsertPoint(defaultBlock);
+        for (auto& sc : s.switchCases) {
+          if (sc.values.empty()) {
+            loops_.push_back({contTarget, exitBlock});
+            genStmt(*sc.body);
+            loops_.pop_back();
+          }
+        }
+        maybeBr(builder_, exitBlock);
+      }
+      for (size_t i = 0; i < cmpBlocks.size(); i++) {
+        const auto& sc = *cmpBlocks[i].first;
+        if (!sc.body || sc.body->body.empty()) continue;
+        builder_.SetInsertPoint(bodyBlocks[i]);
+        loops_.push_back({contTarget, exitBlock});
+        genStmt(*sc.body);
+        loops_.pop_back();
+        maybeBr(builder_, exitBlock);
+      }
+      builder_.SetInsertPoint(exitBlock);
       return;
     }
     case Stmt::Kind::Break:

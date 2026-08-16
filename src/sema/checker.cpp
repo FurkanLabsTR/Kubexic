@@ -84,10 +84,24 @@ void Checker::declare(const Decl& d) {
       consts_[d.name] = v;
       break;
     }
-    case Decl::Kind::Function:
-      if (registerName(d.name)) functions_[d.name] = &d;
+    case Decl::Kind::Function: {
+      bool nameConflict = components_.count(d.name) || systems_.count(d.name) ||
+                          tags_.count(d.name) || structs_.count(d.name) ||
+                          enums_.count(d.name) || consts_.count(d.name);
+      if (nameConflict) {
+        error(d.loc, "duplicate declaration '" + d.name + "'");
+        break;
+      }
+      for (const auto* existing : functions_[d.name]) {
+        if (existing->params.size() == d.params.size()) {
+          error(d.loc, "duplicate function '" + d.name + "' with " +
+                           std::to_string(d.params.size()) + " parameter(s)");
+        }
+      }
+      functions_[d.name].push_back(&d);
       if (d.name == "main") mainSeen_ = true;
       break;
+    }
   }
 }
 
@@ -108,10 +122,12 @@ bool Checker::check() {
     checkSystem(*sys);
     inSystem_ = false;
   }
-  for (auto& [name, d] : functions_) {
-    Decl* fn = const_cast<Decl*>(d);
-    curFnName_ = fn->name;
-    checkFunction(*fn);
+  for (auto& [name, vec] : functions_) {
+    for (const Decl* dp : vec) {
+      Decl* fn = const_cast<Decl*>(dp);
+      curFnName_ = fn->name;
+      checkFunction(*fn);
+    }
   }
 
   return errors_.empty();
@@ -191,9 +207,13 @@ void Checker::checkAttributes(const Decl& d) {
   }
 }
 
-const Decl* Checker::functionByName(const std::string& name) const {
+const Decl* Checker::functionByName(const std::string& name, size_t arity) const {
   auto it = functions_.find(name);
-  return it == functions_.end() ? nullptr : it->second;
+  if (it == functions_.end()) return nullptr;
+  for (const auto* d : it->second) {
+    if (d->params.size() == arity) return d;
+  }
+  return nullptr;
 }
 
 bool Checker::constValue(const std::string& name, ConstValue* out) const {
@@ -378,6 +398,14 @@ std::shared_ptr<Type> Checker::infer(Expr& e) {
                            std::string(" has no member '") + e.member + "'");
           e.type = Type::make(TypeKind::Error);
           return e.type;
+        case TypeKind::String:
+          if (e.member == "Length") {
+            e.type = Type::make(TypeKind::Long);
+            return e.type;
+          }
+          error(e.loc, "'string' has no member '" + e.member + "'");
+          e.type = Type::make(TypeKind::Error);
+          return e.type;
         default:
           if (bt->isUnknownish()) {
             e.type = Type::make(TypeKind::Unknown);
@@ -397,58 +425,87 @@ std::shared_ptr<Type> Checker::infer(Expr& e) {
     case Expr::Kind::Binary: {
       auto lt = infer(*e.lhs);
       auto rt = infer(*e.rhs);
+      if (e.binOp == BinaryOp::And || e.binOp == BinaryOp::Or) {
+        if (!isBoolish(lt) || !isBoolish(rt)) {
+          error(e.loc, "logical operator requires bool operands");
+          e.type = Type::make(TypeKind::Error);
+          return e.type;
+        }
+        e.type = Type::make(TypeKind::Bool);
+        return e.type;
+      }
+      const char* opName = nullptr;
       switch (e.binOp) {
-        case BinaryOp::And:
-        case BinaryOp::Or:
-          if (!isBoolish(lt) || !isBoolish(rt)) {
-            error(e.loc, "logical operator requires bool operands");
-            e.type = Type::make(TypeKind::Error);
-            return e.type;
-          }
+        case BinaryOp::Add: opName = "op_add"; break;
+        case BinaryOp::Sub: opName = "op_sub"; break;
+        case BinaryOp::Mul: opName = "op_mul"; break;
+        case BinaryOp::Div: opName = "op_div"; break;
+        case BinaryOp::Mod: opName = "op_mod"; break;
+        case BinaryOp::Eq: opName = "op_eq"; break;
+        case BinaryOp::Ne: opName = "op_ne"; break;
+        case BinaryOp::Lt: opName = "op_lt"; break;
+        case BinaryOp::Le: opName = "op_le"; break;
+        case BinaryOp::Gt: opName = "op_gt"; break;
+        case BinaryOp::Ge: opName = "op_ge"; break;
+        default: break;
+      }
+      bool anyStruct = lt->kind == TypeKind::Struct || rt->kind == TypeKind::Struct;
+      if (anyStruct && opName) {
+        const Decl* op = functionByName(opName, 2);
+        if (!op) {
+          error(e.loc, "no operator '" + std::string(opName) + "' defined for struct '" +
+                           lt->name + "'");
+          e.type = Type::make(TypeKind::Error);
+          return e.type;
+        }
+        std::map<std::string, std::shared_ptr<Type>> params;
+        params[op->params[0]] = lt;
+        params[op->params[1]] = rt;
+        std::vector<StmtPtr> emptyOpBody;
+        auto ret = reInferBody(op->body ? op->body->body : emptyOpBody, params);
+        e.type = ret ? ret : Type::make(TypeKind::Unknown);
+        return e.type;
+      }
+      if (e.binOp == BinaryOp::Eq || e.binOp == BinaryOp::Ne) {
+        if (lt->kind == rt->kind || (lt->isNumeric() && rt->isNumeric()) || lt->isUnknownish() ||
+            rt->isUnknownish()) {
           e.type = Type::make(TypeKind::Bool);
           return e.type;
-        case BinaryOp::Eq:
-        case BinaryOp::Ne:
-          if (lt->kind == rt->kind || (lt->isNumeric() && rt->isNumeric()) || lt->isUnknownish() ||
-              rt->isUnknownish()) {
-            e.type = Type::make(TypeKind::Bool);
-            return e.type;
-          }
-          error(e.loc, "cannot compare " + lt->describe() + " and " + rt->describe());
-          e.type = Type::make(TypeKind::Error);
-          return e.type;
-        case BinaryOp::Lt:
-        case BinaryOp::Gt:
-        case BinaryOp::Le:
-        case BinaryOp::Ge:
-          if ((lt->isNumeric() && rt->isNumeric()) || lt->isUnknownish() || rt->isUnknownish()) {
-            e.type = Type::make(TypeKind::Bool);
-            return e.type;
-          }
-          error(e.loc, "comparison requires numeric operands");
-          e.type = Type::make(TypeKind::Error);
-          return e.type;
-        case BinaryOp::Add:
-          if (lt->kind == TypeKind::String && rt->kind == TypeKind::String) {
-            e.type = Type::make(TypeKind::String);
-            return e.type;
-          }
-          if ((lt->isNumeric() && rt->isNumeric()) || lt->isUnknownish() || rt->isUnknownish()) {
-            e.type = promote(lt, rt);
-            return e.type;
-          }
-          error(e.loc, "operator '+' requires numeric or two string operands");
-          e.type = Type::make(TypeKind::Error);
-          return e.type;
-        default:
-          if ((lt->isNumeric() && rt->isNumeric()) || lt->isUnknownish() || rt->isUnknownish()) {
-            e.type = promote(lt, rt);
-            return e.type;
-          }
-          error(e.loc, "arithmetic operator requires numeric operands");
-          e.type = Type::make(TypeKind::Error);
-          return e.type;
+        }
+        error(e.loc, "cannot compare " + lt->describe() + " and " + rt->describe());
+        e.type = Type::make(TypeKind::Error);
+        return e.type;
       }
+      if (e.binOp == BinaryOp::Lt || e.binOp == BinaryOp::Gt || e.binOp == BinaryOp::Le ||
+          e.binOp == BinaryOp::Ge) {
+        if ((lt->isNumeric() && rt->isNumeric()) || lt->isUnknownish() || rt->isUnknownish()) {
+          e.type = Type::make(TypeKind::Bool);
+          return e.type;
+        }
+        error(e.loc, "comparison requires numeric operands");
+        e.type = Type::make(TypeKind::Error);
+        return e.type;
+      }
+      if (e.binOp == BinaryOp::Add) {
+        if (lt->kind == TypeKind::String && rt->kind == TypeKind::String) {
+          e.type = Type::make(TypeKind::String);
+          return e.type;
+        }
+        if ((lt->isNumeric() && rt->isNumeric()) || lt->isUnknownish() || rt->isUnknownish()) {
+          e.type = promote(lt, rt);
+          return e.type;
+        }
+        error(e.loc, "operator '+' requires numeric or two string operands");
+        e.type = Type::make(TypeKind::Error);
+        return e.type;
+      }
+      if ((lt->isNumeric() && rt->isNumeric()) || lt->isUnknownish() || rt->isUnknownish()) {
+        e.type = promote(lt, rt);
+        return e.type;
+      }
+      error(e.loc, "arithmetic operator requires numeric operands");
+      e.type = Type::make(TypeKind::Error);
+      return e.type;
     }
     case Expr::Kind::Unary: {
       auto ot = infer(*e.lhs);
@@ -632,12 +689,12 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
       return call.type;
     }
 
-    auto it = functions_.find(name);
-    if (it != functions_.end()) {
-      const Decl& fn = *it->second;
+    const Decl* fnPtr = functionByName(name, call.args.size());
+    if (fnPtr) {
+      const Decl& fn = *fnPtr;
       if (fn.params.size() != call.args.size()) {
         error(call.loc, "function '" + name + "' expects " + std::to_string(fn.params.size()) +
-                            " arguments, got " + std::to_string(call.args.size()));
+                            " argument(s), got " + std::to_string(call.args.size()));
         call.type = Type::make(TypeKind::Error);
         return call.type;
       }
@@ -700,6 +757,57 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
     }
 
     auto bt = infer(*base);
+    if (bt->kind == TypeKind::String) {
+      const std::string& m = callee->member;
+      auto checkInt = [&](size_t i, const char* what) {
+        if (call.args.size() <= i) {
+          error(call.loc, std::string(what) + " requires " + std::to_string(i + 1) +
+                              " argument(s)");
+          return;
+        }
+        infer(*call.args[i].value);
+      };
+      auto checkStr = [&](size_t i, const char* what) {
+        if (call.args.size() <= i) {
+          error(call.loc, std::string(what) + " requires " + std::to_string(i + 1) +
+                              " argument(s)");
+          return;
+        }
+        auto at = infer(*call.args[i].value);
+        if (!assignable(Type::make(TypeKind::String), at)) {
+          error(call.loc, std::string(what) + " expects a string, got " + at->describe());
+        }
+      };
+      if (m == "Substring") {
+        checkInt(0, "Substring");
+        checkInt(1, "Substring");
+        call.type = Type::make(TypeKind::String);
+        return call.type;
+      }
+      if (m == "Contains") {
+        checkStr(0, "Contains");
+        call.type = Type::make(TypeKind::Bool);
+        return call.type;
+      }
+      if (m == "StartsWith") {
+        checkStr(0, "StartsWith");
+        call.type = Type::make(TypeKind::Bool);
+        return call.type;
+      }
+      if (m == "EndsWith") {
+        checkStr(0, "EndsWith");
+        call.type = Type::make(TypeKind::Bool);
+        return call.type;
+      }
+      if (m == "Upper" || m == "Lower") {
+        if (!call.args.empty()) error(call.loc, "string." + m + " takes no arguments");
+        call.type = Type::make(TypeKind::String);
+        return call.type;
+      }
+      error(call.loc, "'string' has no method '" + m + "'");
+      call.type = Type::make(TypeKind::Error);
+      return call.type;
+    }
     if (bt->kind == TypeKind::List || bt->kind == TypeKind::Map) {
       const std::string& m = callee->member;
       bool mutating = m == "Add" || m == "Set" || m == "RemoveAt" || m == "Remove" ||
@@ -924,8 +1032,54 @@ void Checker::checkStmt(Stmt& s) {
       }
       return;
     }
+    case Stmt::Kind::Switch: {
+      auto ct = infer(*s.cond);
+      std::shared_ptr<Type> valueType;
+      bool first = true;
+      for (auto& sc : s.switchCases) {
+        for (auto& v : sc.values) {
+          auto vt = infer(*v);
+          if (!(v->kind == Expr::Kind::IntLit || v->kind == Expr::Kind::StringLit ||
+                v->kind == Expr::Kind::BoolLit || v->kind == Expr::Kind::FloatLit)) {
+            error(v->loc, "switch case value must be a literal");
+            continue;
+          }
+          if (first) {
+            valueType = vt;
+            first = false;
+          } else if (!assignable(valueType, vt)) {
+            error(v->loc, "switch case value type does not match the condition");
+          }
+        }
+        if (!sc.body) continue;
+        if (sc.body->body.empty()) continue;
+        switchDepth_++;
+        checkStmt(*sc.body);
+        switchDepth_--;
+        const Stmt* last = nullptr;
+        if (!sc.body->body.empty()) last = sc.body->body.back().get();
+        bool terminates = false;
+        if (last) {
+          if (last->kind == Stmt::Kind::Break || last->kind == Stmt::Kind::Return ||
+              last->kind == Stmt::Kind::Continue) {
+            terminates = true;
+          } else if (last->kind == Stmt::Kind::Block && !last->body.empty()) {
+            const Stmt* inner = last->body.back().get();
+            terminates = inner && (inner->kind == Stmt::Kind::Break ||
+                                   inner->kind == Stmt::Kind::Return ||
+                                   inner->kind == Stmt::Kind::Continue);
+          }
+        }
+        if (!terminates) {
+          error(sc.body->loc, "switch case must end with 'break' or 'return'");
+        }
+      }
+      return;
+    }
     case Stmt::Kind::Break:
-      if (loopDepth_ == 0) error(s.loc, "'break' outside of a loop");
+      if (loopDepth_ == 0 && switchDepth_ == 0) {
+        error(s.loc, "'break' outside of a loop or switch");
+      }
       return;
     case Stmt::Kind::Continue:
       if (loopDepth_ == 0) error(s.loc, "'continue' outside of a loop");

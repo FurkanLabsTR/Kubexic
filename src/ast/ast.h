@@ -115,12 +115,19 @@ struct Stmt {
     Attach,
     Detach,
     Despawn,
+    Switch,
+  };
+
+  struct SwitchCase {
+    std::vector<ExprPtr> values;
+    StmtPtr body;
   };
 
   Kind kind;
   SourceLoc loc;
 
   std::vector<StmtPtr> body;
+  std::vector<SwitchCase> switchCases;
   StmtPtr thenStmt;
   StmtPtr elseStmt;
   StmtPtr bodyStmt;

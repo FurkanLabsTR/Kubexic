@@ -32,7 +32,8 @@ constexpr KeywordEntry kKeywords[] = {
     {"using", TokenKind::KwUsing},         {"true", TokenKind::KwTrue},
     {"false", TokenKind::KwFalse},         {"is", TokenKind::KwIs},
     {"exact", TokenKind::KwExact},         {"panic", TokenKind::KwPanic},
-    {"in", TokenKind::KwIn},
+    {"in", TokenKind::KwIn},             {"switch", TokenKind::KwSwitch},
+    {"case", TokenKind::KwCase},           {"default", TokenKind::KwDefault},
 };
 
 TokenKind lookupKeyword(const std::string& text) {
@@ -98,6 +99,9 @@ const char* tokenKindName(TokenKind kind) {
     case TokenKind::KwExact: return "'exact'";
     case TokenKind::KwPanic: return "'panic'";
     case TokenKind::KwIn: return "'in'";
+    case TokenKind::KwSwitch: return "'switch'";
+    case TokenKind::KwCase: return "'case'";
+    case TokenKind::KwDefault: return "'default'";
     case TokenKind::LBrace: return "'{'";
     case TokenKind::RBrace: return "'}'";
     case TokenKind::LParen: return "'('";

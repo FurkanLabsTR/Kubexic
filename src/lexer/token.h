@@ -53,6 +53,9 @@ enum class TokenKind {
   KwExact,
   KwPanic,
   KwIn,
+  KwSwitch,
+  KwCase,
+  KwDefault,
 
   LBrace,
   RBrace,
