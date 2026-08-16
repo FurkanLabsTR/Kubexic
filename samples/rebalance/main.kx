@@ -1,0 +1,9 @@
+// main.kx
+int main() {
+    for (var i = 0; i < 200; i++) {
+        spawn { Counter { value = 0 }, tags [Counting] };
+    }
+    run(max, ticks: 200);
+    std.println("rebalance demo done");
+    return 0;
+}

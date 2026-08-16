@@ -1,0 +1,12 @@
+// WatchSystem.kx — global aggregation over the frozen view every 25 ticks
+system WatchSystem {
+    if (tick % 25 == 0) {
+        var total = 0;
+        var count = 0;
+        foreach (var t in others<Counter>(tag: Counting)) {
+            total += t.Counter.value;
+            count += 1;
+        }
+        std.println($"tick {tick}: count={count} sum={total}");
+    }
+}

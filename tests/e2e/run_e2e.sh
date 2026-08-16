@@ -70,5 +70,21 @@ fi
 PASS=$((PASS + 1))
 echo "e2e determinism (8 boxes, two runs): PASS"
 
-echo "e2e: $PASS/4 checks passed"
+./build/kxc build samples/rebalance build/e2e_rebalance
+
+RB1=$(KUBEXIC_CORES=1 timeout 20 ./build/e2e_rebalance)
+RB4=$(KUBEXIC_CORES=4 timeout 20 ./build/e2e_rebalance)
+RBM=$(KUBEXIC_CORES=4 KUBEXIC_MIGRATE_ALL=1 timeout 20 ./build/e2e_rebalance)
+if [ "$RB1" != "$RB4" ]; then
+  echo "e2e rebalance: FAIL (1 box != 4 boxes)"
+  exit 1
+fi
+if [ "$RBM" != "$RB4" ]; then
+  echo "e2e rebalance: FAIL (forced migration changed results)"
+  exit 1
+fi
+PASS=$((PASS + 1))
+echo "e2e migration invariance (migrate-all == normal): PASS"
+
+echo "e2e: $PASS/5 checks passed"
 exit 0

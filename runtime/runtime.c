@@ -57,7 +57,6 @@ typedef struct {
 static int g_compCount;
 static int g_fieldCounts[KX_MAX_COMPONENTS];
 static int g_boxCount = 1;
-static int g_maxBoxes = KX_MAX_BOXES;
 static kx_box* g_boxes;
 
 static long long* g_frozenIds;
@@ -79,6 +78,79 @@ static volatile int g_stop;
 
 static long long g_spawnCounter;
 static pthread_mutex_t g_spawnLock = PTHREAD_MUTEX_INITIALIZER;
+
+static int entityBox(kx_entity e);
+static int entitySlot(kx_entity e);
+static int entityGen(kx_entity e);
+static int slotAlive(kx_box* b, long long slot);
+
+/* ---- migration location table (entity id -> current box + slot) ---- */
+
+static void locInsert(kx_entity e, int box, long long slot);
+
+static kx_entity* g_locKeys;
+static int* g_locBoxes;
+static long long* g_locSlots;
+static int g_locCap;
+static int g_locCount;
+
+static void locGrow(void) {
+  int newCap = g_locCap ? g_locCap * 2 : 64;
+  kx_entity* oldKeys = g_locKeys;
+  int* oldBoxes = g_locBoxes;
+  long long* oldSlots = g_locSlots;
+  int oldCap = g_locCap;
+  g_locKeys = (kx_entity*)calloc(newCap, sizeof(kx_entity));
+  g_locBoxes = (int*)calloc(newCap, sizeof(int));
+  g_locSlots = (long long*)calloc(newCap, sizeof(long long));
+  g_locCap = newCap;
+  g_locCount = 0;
+  for (int i = 0; i < oldCap; i++) {
+    if (oldKeys[i] != 0) locInsert(oldKeys[i], oldBoxes[i], oldSlots[i]);
+  }
+  free(oldKeys);
+  free(oldBoxes);
+  free(oldSlots);
+}
+
+static void locInsert(kx_entity e, int box, long long slot) {
+  if (g_locCount * 10 >= g_locCap * 7) locGrow();
+  size_t i = (size_t)(e * 2654435761u) & (g_locCap - 1);
+  while (g_locKeys[i] != 0 && g_locKeys[i] != e) i = (i + 1) & (g_locCap - 1);
+  if (g_locKeys[i] == 0) {
+    g_locKeys[i] = e;
+    g_locCount++;
+  }
+  g_locBoxes[i] = box;
+  g_locSlots[i] = slot;
+}
+
+/* Resolve an entity to (box, slot): origin first, then the migration table. */
+static int resolve(kx_entity e, kx_box** box, long long* slot) {
+  int ob = entityBox(e);
+  if (ob < 0 || ob >= g_boxCount) return 0;
+  kx_box* b = &g_boxes[ob];
+  long long oslot = entitySlot(e);
+  if (slotAlive(b, oslot) && entityGen(e) == b->gens[oslot]) {
+    *box = b;
+    *slot = oslot;
+    return 1;
+  }
+  if (g_locCap) {
+    size_t i = (size_t)(e * 2654435761u) & (g_locCap - 1);
+    for (int probes = 0; probes < g_locCap; probes++) {
+      kx_entity k = g_locKeys[i];
+      if (k == 0) return 0;
+      if (k == e) {
+        *box = &g_boxes[g_locBoxes[i]];
+        *slot = g_locSlots[i];
+        return 1;
+      }
+      i = (i + 1) & (g_locCap - 1);
+    }
+  }
+  return 0;
+}
 
 /* ---- output buffers (deterministic flush order) ---- */
 
@@ -121,12 +193,10 @@ static int slotAlive(kx_box* b, long long slot) {
   return slot >= 0 && slot < b->size && b->gens[slot] != 0;
 }
 
-static int entityAlive(kx_entity e) {
-  int box = entityBox(e);
-  if (box < 0 || box >= g_boxCount) return 0;
-  kx_box* b = &g_boxes[box];
-  long long slot = entitySlot(e);
-  return slotAlive(b, slot) && entityGen(e) == b->gens[slot];
+static kx_box* resolveBox(kx_entity e) {
+  kx_box* b;
+  long long s;
+  return resolve(e, &b, &s) ? b : NULL;
 }
 
 static void growBox(kx_box* b) {
@@ -218,9 +288,10 @@ static void enqueue(kx_box* box, int source, kx_req r) {
   box->queues[source][box->qSize[source]++] = r;
 }
 
-static void applyRequest(kx_box* b, kx_entity e, const kx_req* r) {
-  long long slot = entitySlot(e);
-  if (!slotAlive(b, slot) || entityGen(e) != b->gens[slot]) return;
+static void applyRequest(kx_entity e, const kx_req* r) {
+  kx_box* b;
+  long long slot;
+  if (!resolve(e, &b, &slot)) return;
   switch (r->kind) {
     case REQ_ENSURE:
       b->compMasks[slot] |= (1LL << r->comp);
@@ -253,7 +324,7 @@ static void applyRequest(kx_box* b, kx_entity e, const kx_req* r) {
 static void commitBox(kx_box* b) {
   for (int src = 0; src <= g_boxCount; src++) {
     for (int i = 0; i < b->qSize[src]; i++) {
-      applyRequest(b, b->queues[src][i].v, &b->queues[src][i]);
+      applyRequest(b->queues[src][i].v, &b->queues[src][i]);
     }
     b->qSize[src] = 0;
   }
@@ -323,86 +394,78 @@ kx_entity kx_spawn(long long tagMask) {
 }
 
 void kx_ensure_comp(kx_entity e, int comp) {
-  if (!entityAlive(e) || comp < 0 || comp >= g_compCount) return;
+  kx_box* b = resolveBox(e);
+  if (!b || comp < 0 || comp >= g_compCount) return;
   kx_req r = {REQ_ENSURE, comp, 0, e};
-  enqueue(&g_boxes[entityBox(e)], g_currentBuffer < 0 ? g_boxCount : g_currentBuffer, r);
+  enqueue(b, g_currentBuffer < 0 ? g_boxCount : g_currentBuffer, r);
 }
 
 void kx_detach_comp(kx_entity e, int comp) {
-  if (!entityAlive(e) || comp < 0 || comp >= g_compCount) return;
+  kx_box* b = resolveBox(e);
+  if (!b || comp < 0 || comp >= g_compCount) return;
   kx_req r = {REQ_DETACH, comp, 0, e};
-  enqueue(&g_boxes[entityBox(e)], g_currentBuffer < 0 ? g_boxCount : g_currentBuffer, r);
+  enqueue(b, g_currentBuffer < 0 ? g_boxCount : g_currentBuffer, r);
 }
 
 void kx_despawn(kx_entity e) {
-  if (!entityAlive(e)) return;
+  kx_box* b = resolveBox(e);
+  if (!b) return;
   kx_req r = {REQ_DESPAWN, 0, 0, e};
-  enqueue(&g_boxes[entityBox(e)], g_currentBuffer < 0 ? g_boxCount : g_currentBuffer, r);
+  enqueue(b, g_currentBuffer < 0 ? g_boxCount : g_currentBuffer, r);
 }
 
 /* ---- live self-access (box-local, no locks) ---- */
 
 long long kx_comp_read_i64(kx_entity e, int comp, int field) {
-  int box = entityBox(e);
-  if (box < 0 || box >= g_boxCount) return 0;
-  kx_box* b = &g_boxes[box];
-  long long slot = entitySlot(e);
-  if (!slotAlive(b, slot) || entityGen(e) != b->gens[slot]) return 0;
+  kx_box* b;
+  long long slot;
+  if (!resolve(e, &b, &slot)) return 0;
   if (comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp]) return 0;
   return ((long long*)b->fFields[comp * KX_MAX_FIELDS + field])[slot];
 }
 
 void kx_comp_write_i64(kx_entity e, int comp, int field, long long v) {
-  int box = entityBox(e);
-  if (box < 0 || box >= g_boxCount) return;
-  kx_box* b = &g_boxes[box];
-  long long slot = entitySlot(e);
-  if (!slotAlive(b, slot) || entityGen(e) != b->gens[slot]) return;
+  kx_box* b;
+  long long slot;
+  if (!resolve(e, &b, &slot)) return;
   if (comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp]) return;
   ((long long*)b->fFields[comp * KX_MAX_FIELDS + field])[slot] = v;
 }
 
 double kx_comp_read_f64(kx_entity e, int comp, int field) {
-  int box = entityBox(e);
-  if (box < 0 || box >= g_boxCount) return 0.0;
-  kx_box* b = &g_boxes[box];
-  long long slot = entitySlot(e);
-  if (!slotAlive(b, slot) || entityGen(e) != b->gens[slot]) return 0.0;
+  kx_box* b;
+  long long slot;
+  if (!resolve(e, &b, &slot)) return 0.0;
   if (comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp]) return 0.0;
   return ((double*)b->fFields[comp * KX_MAX_FIELDS + field])[slot];
 }
 
 void kx_comp_write_f64(kx_entity e, int comp, int field, double v) {
-  int box = entityBox(e);
-  if (box < 0 || box >= g_boxCount) return;
-  kx_box* b = &g_boxes[box];
-  long long slot = entitySlot(e);
-  if (!slotAlive(b, slot) || entityGen(e) != b->gens[slot]) return;
+  kx_box* b;
+  long long slot;
+  if (!resolve(e, &b, &slot)) return;
   if (comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp]) return;
   ((double*)b->fFields[comp * KX_MAX_FIELDS + field])[slot] = v;
 }
 
 char* kx_comp_read_str(kx_entity e, int comp, int field) {
-  int box = entityBox(e);
-  if (box < 0 || box >= g_boxCount) return NULL;
-  kx_box* b = &g_boxes[box];
-  long long slot = entitySlot(e);
-  if (!slotAlive(b, slot) || entityGen(e) != b->gens[slot]) return NULL;
+  kx_box* b;
+  long long slot;
+  if (!resolve(e, &b, &slot)) return NULL;
   if (comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp]) return NULL;
   return ((char**)b->fFields[comp * KX_MAX_FIELDS + field])[slot];
 }
 
 void kx_comp_write_str(kx_entity e, int comp, int field, char* v) {
-  int box = entityBox(e);
-  if (box < 0 || box >= g_boxCount) return;
-  kx_box* b = &g_boxes[box];
-  long long slot = entitySlot(e);
-  if (!slotAlive(b, slot) || entityGen(e) != b->gens[slot]) return;
+  kx_box* b;
+  long long slot;
+  if (!resolve(e, &b, &slot)) return;
   if (comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp]) return;
   ((char**)b->fFields[comp * KX_MAX_FIELDS + field])[slot] = v;
 }
 
-/* ---- freeze (per-box) + merge (deterministic global order) ---- */
+/* ---- freeze (per-box) + merge (sorted by entity id: deterministic
+ * regardless of box placement or migration) ---- */
 
 static void freezeBox(kx_box* b) {
   long long fs = 0;
@@ -424,6 +487,21 @@ static void freezeBox(kx_box* b) {
   b->fSize = fs;
 }
 
+typedef struct {
+  long long id;
+  int box;
+  long long idx;
+} kx_fent;
+
+static kx_fent* g_sortBuf;
+static int g_sortCap;
+
+static int cmpFent(const void* a, const void* b) {
+  long long x = ((const kx_fent*)a)->id;
+  long long y = ((const kx_fent*)b)->id;
+  return x < y ? -1 : (x > y ? 1 : 0);
+}
+
 static void mergeFrozen(void) {
   long long total = 0;
   for (int i = 0; i < g_boxCount; i++) total += g_boxes[i].fSize;
@@ -434,23 +512,37 @@ static void mergeFrozen(void) {
     g_frozenTagMasks = (long long*)realloc(g_frozenTagMasks, sizeof(long long) * cap);
     g_frozenCompMasks = (long long*)realloc(g_frozenCompMasks, sizeof(long long) * cap);
   }
-  long long fs = 0;
+  if (total > g_sortCap) {
+    g_sortCap = total > 0 ? total : 1;
+    g_sortBuf = (kx_fent*)realloc(g_sortBuf, sizeof(kx_fent) * g_sortCap);
+  }
+  long long n = 0;
   for (int i = 0; i < g_boxCount; i++) {
     kx_box* b = &g_boxes[i];
     for (long long j = 0; j < b->fSize; j++) {
-      g_frozenIds[fs] = b->fIds[j];
-      g_frozenTagMasks[fs] = b->fTags[j];
-      long long cm = b->fComps[j];
-      g_frozenCompMasks[fs] = cm;
-      for (int c = 0; c < g_compCount; c++) {
-        if (!(cm & (1LL << c))) continue;
-        for (int f = 0; f < g_fieldCounts[c]; f++) {
-          memcpy((char*)g_frozenFields[c * KX_MAX_FIELDS + f] + fs * 8,
-                 (char*)b->fFields[c * KX_MAX_FIELDS + f] + j * 8, 8);
-        }
-      }
-      fs++;
+      g_sortBuf[n].id = b->fIds[j];
+      g_sortBuf[n].box = i;
+      g_sortBuf[n].idx = j;
+      n++;
     }
+  }
+  qsort(g_sortBuf, n, sizeof(kx_fent), cmpFent);
+  long long fs = 0;
+  for (long long k = 0; k < n; k++) {
+    kx_box* b = &g_boxes[g_sortBuf[k].box];
+    long long j = g_sortBuf[k].idx;
+    g_frozenIds[fs] = b->fIds[j];
+    g_frozenTagMasks[fs] = b->fTags[j];
+    long long cm = b->fComps[j];
+    g_frozenCompMasks[fs] = cm;
+    for (int c = 0; c < g_compCount; c++) {
+      if (!(cm & (1LL << c))) continue;
+      for (int f = 0; f < g_fieldCounts[c]; f++) {
+        memcpy((char*)g_frozenFields[c * KX_MAX_FIELDS + f] + fs * 8,
+               (char*)b->fFields[c * KX_MAX_FIELDS + f] + j * 8, 8);
+      }
+    }
+    fs++;
   }
   g_frozenSize = fs;
 }
@@ -519,6 +611,76 @@ char* kx_snap_read_str(long long h, int comp, int field) {
       field >= g_fieldCounts[comp])
     return NULL;
   return ((char**)g_frozenFields[comp * KX_MAX_FIELDS + field])[h];
+}
+
+/* ---- migration + load rebalancing (coordinator phase, deterministic) ---- */
+
+static void migrateEntity(kx_box* from, long long slot, kx_box* to) {
+  long long nslot = -1;
+  for (int i = 0; i < to->size; i++) {
+    if (!slotAlive(to, i)) { nslot = i; break; }
+  }
+  if (nslot < 0) {
+    nslot = to->size++;
+    if (to->size > to->cap) growBox(to);
+  }
+  to->gens[nslot] = (to->gens[nslot] + 1) & 0xFFFF;
+  if (to->gens[nslot] == 0) to->gens[nslot] = 1;
+  to->tagMasks[nslot] = from->tagMasks[slot];
+  long long cm = from->compMasks[slot];
+  to->compMasks[nslot] = cm;
+  for (int c = 0; c < g_compCount; c++) {
+    if (!(cm & (1LL << c))) continue;
+    for (int f = 0; f < g_fieldCounts[c]; f++) {
+      memcpy((char*)to->fFields[c * KX_MAX_FIELDS + f] + nslot * 8,
+             (char*)from->fFields[c * KX_MAX_FIELDS + f] + slot * 8, 8);
+    }
+  }
+  kx_entity id = ((kx_entity)(from - g_boxes) << 48) | (slot << 16) | from->gens[slot];
+  locInsert(id, (int)(to - g_boxes), nslot);
+  from->gens[slot] = (from->gens[slot] + 1) & 0xFFFF;
+  if (from->gens[slot] == 0) from->gens[slot] = 1;
+  from->tagMasks[slot] = 0;
+  from->compMasks[slot] = 0;
+}
+
+static long long aliveCount(const kx_box* b) {
+  long long n = 0;
+  for (int i = 0; i < b->size; i++) {
+    if (b->gens[i] != 0) n++;
+  }
+  return n;
+}
+
+static void rebalance(void) {
+  if (g_boxCount < 2) return;
+  if (getenv("KUBEXIC_MIGRATE_ALL")) {
+    for (int i = 1; i < g_boxCount; i++) {
+      kx_box* b = &g_boxes[i];
+      for (long long slot = 0; slot < b->size; slot++) {
+        if (slotAlive(b, slot)) migrateEntity(b, slot, &g_boxes[0]);
+      }
+    }
+    return;
+  }
+  if (g_tick == 0 || g_tick % 30 != 0) return;
+  int heavy = 0;
+  int light = 0;
+  for (int i = 1; i < g_boxCount; i++) {
+    if (aliveCount(&g_boxes[i]) > aliveCount(&g_boxes[heavy])) heavy = i;
+    if (aliveCount(&g_boxes[i]) < aliveCount(&g_boxes[light])) light = i;
+  }
+  long long diff = aliveCount(&g_boxes[heavy]) - aliveCount(&g_boxes[light]);
+  if (diff <= 32) return;
+  long long n = diff / 2;
+  kx_box* h = &g_boxes[heavy];
+  kx_box* l = &g_boxes[light];
+  for (long long slot = 0; slot < h->size && n > 0; slot++) {
+    if (slotAlive(h, slot)) {
+      migrateEntity(h, slot, l);
+      n--;
+    }
+  }
 }
 
 void kx_stop(void) { g_stop = 1; }
@@ -628,6 +790,7 @@ void kx_run(int tps, long long maxTicks, double cores) {
       pthread_barrier_wait(&commitBarrier);
       pthread_barrier_wait(&freezeBarrier);
       mergeFrozen();
+      rebalance();
       for (int i = 0; i < g_boxCount; i++) bufFlush(i);
       g_tick++;
       if (g_tps > 0) {
@@ -681,6 +844,7 @@ void kx_run(int tps, long long maxTicks, double cores) {
       commitBox(b);
       freezeBox(b);
       mergeFrozen();
+      rebalance();
       bufFlush(0);
       g_tick++;
       if (g_tps > 0) {

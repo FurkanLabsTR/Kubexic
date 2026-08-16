@@ -1,0 +1,4 @@
+// TickSystem.kx — every entity increments its own counter every tick
+system TickSystem {
+    Counter.value += 1;
+}
