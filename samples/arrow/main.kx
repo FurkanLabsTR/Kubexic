@@ -1,0 +1,9 @@
+// main.kx
+int main() {
+    std.println("Starting simulation...");
+    for (var i = 0; i < 100; i++) {
+        spawn { Pos3 { x = i, y = 10, z = 0 }, Health { hp = 100 }, tags [Combatant] };
+    }
+    run(60);
+    return 0;
+}

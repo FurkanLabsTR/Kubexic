@@ -1,0 +1,10 @@
+build/
+build-*/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.obj
+*.exe
+kxc
+.kx-cache/

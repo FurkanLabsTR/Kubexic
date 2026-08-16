@@ -1,0 +1,7 @@
+// ArrowSystem.kx
+system ArrowSystem {
+    foreach (var hit in spatial.Overlap(Pos3, 0.5)) {
+        attach(hit.Id, new Damage { amount = 10, sender = Arrow.sender });
+        despawn self;
+    }
+}

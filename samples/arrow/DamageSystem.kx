@@ -1,0 +1,10 @@
+// DamageSystem.kx
+system DamageSystem {
+    Health.hp -= Damage.amount;
+    if (Health.hp <= 0) {
+        attach(Damage.sender, new Healing { amount = 5 });
+        despawn self;
+    } else {
+        detach(self, Damage);
+    }
+}

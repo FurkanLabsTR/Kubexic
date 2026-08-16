@@ -1,0 +1,4 @@
+// Healing.kx
+component Healing {
+    var amount = 5;
+}

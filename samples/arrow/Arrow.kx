@@ -1,0 +1,4 @@
+// Arrow.kx
+component Arrow {
+    var sender = EntityId.None;
+}

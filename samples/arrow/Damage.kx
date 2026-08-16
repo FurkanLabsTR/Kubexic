@@ -1,0 +1,5 @@
+// Damage.kx — a message component
+component Damage {
+    var amount = 10;
+    var sender = EntityId.None;
+}
