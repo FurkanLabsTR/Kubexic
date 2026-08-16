@@ -1,0 +1,10 @@
+// CountSystem.kx
+system CountSystem {
+    Counter.value += 1;
+    if (Counter.value == 5) {
+        std.println($"tick {tick}: counter hit 5");
+    }
+    if (Counter.value >= 7) {
+        despawn self;
+    }
+}

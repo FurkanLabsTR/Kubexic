@@ -1,0 +1,12 @@
+// WatchSystem.kx — reads OTHER entities via the frozen view (tag channel)
+system WatchSystem {
+    var seen = 0;
+    foreach (var t in others<Counter>(tag: Counting)) {
+        if (t.Counter.value > seen) {
+            seen = t.Counter.value;
+        }
+    }
+    if (seen > 0) {
+        std.println($"tick {tick}: max counter seen = {seen}");
+    }
+}

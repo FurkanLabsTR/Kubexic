@@ -569,7 +569,6 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
     }
 
     if (name == "run") {
-      for (auto& a : call.args) infer(*a.value);
       call.type = Type::make(TypeKind::Void);
       return call.type;
     }

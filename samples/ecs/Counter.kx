@@ -1,0 +1,5 @@
+// Counter.kx
+component Counter {
+    var value = 0;
+    var owner = EntityId.None;
+}

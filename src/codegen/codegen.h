@@ -41,10 +41,33 @@ class Codegen {
   void genStmt(const Stmt& s);
   void genBlock(const std::vector<StmtPtr>& body);
   void storeTo(const Expr& lhs, llvm::Value* val);
-  llvm::Value* loadLocal(const std::string& name);
   llvm::Value* toStr(llvm::Value* v, const std::shared_ptr<Type>& t);
   llvm::Value* coerce(llvm::Value* v, llvm::Type* to);
   llvm::Type* structType(const std::string& name);
+
+  void emitSystemFunction(const Decl& d);
+  void emitInitCalls();
+  void declareEcsRuntime();
+  void computeMetadata();
+  uint64_t tagBit(const std::string& name) const;
+  uint64_t tagAncestors(const std::string& name) const;
+  uint64_t tagSubtree(const std::string& name) const;
+  int componentIndex(const std::string& name) const;
+  int fieldIndex(const std::string& comp, const std::string& field) const;
+  llvm::Function* runtimeFn(const std::string& name, llvm::Type* ret,
+                            std::vector<llvm::Type*> params);
+  std::shared_ptr<Type> fieldType(const std::string& comp, int fieldIdx);
+  void emitCompWriteValue(llvm::Value* entity, int compIdx, int fieldIdx,
+                          const std::shared_ptr<Type>& ft, llvm::Value* v);
+  llvm::Value* emitCompReadValue(llvm::Value* entity, int compIdx, int fieldIdx,
+                                 const std::shared_ptr<Type>& ft, llvm::Type* llvmTy);
+  llvm::Value* snapReadValue(llvm::Value* handle, int compIdx, int fieldIdx,
+                             const std::shared_ptr<Type>& ft, llvm::Type* llvmTy);
+  llvm::Value* genComponentRead(const Expr& e, llvm::Value* entityId);
+  void genComponentWrite(const Expr& e, llvm::Value* entityId, llvm::Value* val);
+  void emitSpawn(const Expr& e);
+  uint64_t maskOfNames(const std::vector<std::string>& names) const;
+  void extractTagArg(const Expr& call, std::string* tag, bool* exact) const;
   void error(const SourceLoc& loc, const std::string& msg);
 
   Checker& checker_;
@@ -63,6 +86,17 @@ class Codegen {
   llvm::Function* curFn_ = nullptr;
   llvm::Type* curRetType_ = nullptr;
   std::string curFnName_;
+  llvm::AllocaInst* curSelf_ = nullptr;
+  llvm::GlobalVariable* fieldCountsGlobal_ = nullptr;
+  llvm::GlobalVariable* systemsGlobal_ = nullptr;
+  llvm::Value* spawnResult_ = nullptr;
+
+  std::vector<std::string> compNames_;
+  std::map<std::string, std::vector<std::string>> compFields_;
+  std::map<std::string, uint64_t> tagBits_;
+  std::map<std::string, std::string> tagParents_;
+  std::vector<std::string> tagOrder_;
+  std::vector<std::string> systemOrder_;
   std::vector<std::string> errors_;
 };
 
