@@ -18,6 +18,7 @@
 typedef long long kx_entity;
 
 void kx_panic(const char* msg);
+void kx_poll_stdin(void);
 
 /* ---- collections (ownership trees: never shared, deep-copied) ---- */
 
@@ -358,6 +359,7 @@ static long long g_maxTicks;
 static long long g_tick;
 static double g_dt;
 static volatile int g_stop;
+static volatile int g_inRun;
 
 static long long g_spawnCounter;
 static pthread_mutex_t g_spawnLock = PTHREAD_MUTEX_INITIALIZER;
@@ -1056,6 +1058,7 @@ static void* kx_worker(void* argp) {
 }
 
 void kx_run(int tps, long long maxTicks, double cores) {
+  g_inRun = 1;
   g_tps = tps > 0 ? tps : 0;
   g_maxTicks = maxTicks;
   g_stop = 0;
@@ -1106,6 +1109,7 @@ void kx_run(int tps, long long maxTicks, double cores) {
     for (;;) {
       if (g_stop) break;
       if (g_maxTicks >= 0 && g_tick >= g_maxTicks) break;
+      kx_poll_stdin();
       pthread_barrier_wait(&startBarrier);
       pthread_barrier_wait(&simBarrier);
       pthread_barrier_wait(&commitBarrier);
@@ -1149,6 +1153,7 @@ void kx_run(int tps, long long maxTicks, double cores) {
     for (;;) {
       if (g_stop) break;
       if (g_maxTicks >= 0 && g_tick >= g_maxTicks) break;
+      kx_poll_stdin();
       for (int s = 0; s < g_sysCount; s++) {
         if (g_sysMatch[s] == 0 && g_sysWithout[s] == 0) g_sysBodies[s](0);
       }
@@ -1191,6 +1196,7 @@ void kx_run(int tps, long long maxTicks, double cores) {
   g_currentBuffer = g_boxCount;
   for (int i = 0; i < g_boxCount; i++) commitBox(&g_boxes[i]);
   bufFlush(g_boxCount);
+  g_inRun = 0;
 }
 
 /* ---- console, string helpers, process control ---- */
@@ -1340,4 +1346,64 @@ long long kx_rng_seed(long long seed) { return seed; }
 long long kx_rng_next(long long state) {
   state = state * 6364136223846793005LL + 1442695040888963407LL;
   return state;
+}
+
+double kx_rng_next_double(long long state) {
+  unsigned long long u = (unsigned long long)state >> 11;
+  return (double)u / 9007199254740992.0;
+}
+
+void kx_log(long long level, const char* msg) {
+  (void)level;
+  if (msg) fprintf(stderr, "[log] %s\n", msg);
+}
+
+double kx_clamp(double x, double lo, double hi) {
+  if (x < lo) return lo;
+  if (x > hi) return hi;
+  return x;
+}
+
+double kx_lerp(double a, double b, double t) { return a + (b - a) * t; }
+
+/* ---- stdin line queue (polled between ticks, deterministic order) ---- */
+
+#define KX_STDIN_Q 64
+
+static char* g_stdinQueue[KX_STDIN_Q];
+static int g_stdinHead;
+static int g_stdinTail;
+static int g_stdinCount;
+
+void kx_poll_stdin(void) {
+  if (g_stdinCount >= KX_STDIN_Q) return;
+  struct timeval tv = {0, 0};
+  fd_set set;
+  FD_ZERO(&set);
+  FD_SET(0, &set);
+  if (select(1, &set, NULL, NULL, &tv) <= 0) return;
+  if (!FD_ISSET(0, &set)) return;
+  char* line = NULL;
+  size_t cap = 0;
+  ssize_t n = getline(&line, &cap, stdin);
+  if (n < 0) {
+    free(line);
+    return;
+  }
+  while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) {
+    line[n - 1] = '\0';
+    n--;
+  }
+  g_stdinQueue[g_stdinTail] = line;
+  g_stdinTail = (g_stdinTail + 1) % KX_STDIN_Q;
+  g_stdinCount++;
+}
+
+char* kx_poll_line(void) {
+  if (g_stdinCount == 0 && !g_inRun) kx_poll_stdin();
+  if (g_stdinCount == 0) return NULL;
+  char* line = g_stdinQueue[g_stdinHead];
+  g_stdinHead = (g_stdinHead + 1) % KX_STDIN_Q;
+  g_stdinCount--;
+  return line;
 }

@@ -90,6 +90,7 @@ std::string Type::describe() const {
     case TypeKind::Map:
       return "Map<" + (inner ? inner->describe() : std::string("?")) + ", " +
              (inner2 ? inner2->describe() : std::string("?")) + ">";
+    case TypeKind::Rng: return "Rng";
     case TypeKind::Self: return "self";
     case TypeKind::Generic: return "any";
     case TypeKind::Unknown: return "unknown";

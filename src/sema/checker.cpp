@@ -714,13 +714,24 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
     Expr* base = callee->lhs.get();
     if (base->kind == Expr::Kind::Identifier && base->str == "std") {
       const std::string& m = callee->member;
-      if (m == "println" || m == "print" || m == "log") {
+      if (m == "println" || m == "print") {
+        for (auto& a : call.args) infer(*a.value);
+        call.type = Type::make(TypeKind::Void);
+        return call.type;
+      }
+      if (m == "log") {
+        if (call.args.size() != 2) error(call.loc, "std.log requires (level, message)");
         for (auto& a : call.args) infer(*a.value);
         call.type = Type::make(TypeKind::Void);
         return call.type;
       }
       if (m == "readln") {
         if (!call.args.empty()) error(call.loc, "std.readln takes no arguments");
+        call.type = Type::option(Type::make(TypeKind::String));
+        return call.type;
+      }
+      if (m == "pollLine") {
+        if (!call.args.empty()) error(call.loc, "std.pollLine takes no arguments");
         call.type = Type::option(Type::make(TypeKind::String));
         return call.type;
       }
@@ -738,7 +749,69 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
       if (m == "rng") {
         if (call.args.size() != 1) error(call.loc, "std.rng requires one seed argument");
         for (auto& a : call.args) infer(*a.value);
-        call.type = Type::make(TypeKind::Generic);
+        call.type = Type::make(TypeKind::Rng);
+        return call.type;
+      }
+      {
+        static const char* kMath1[] = {"sqrt",  "sin",  "cos",  "tan",  "asin", "acos",
+                                       "atan",  "exp",  "log",  "log2", "log10",
+                                       "floor", "ceil", "round"};
+        for (const char* f : kMath1) {
+          if (m == f) {
+            if (call.args.size() != 1) {
+              error(call.loc, std::string("std.") + f + " requires one argument");
+            }
+            auto at = call.args.empty() ? Type::make(TypeKind::Unknown)
+                                        : infer(*call.args[0].value);
+            if (!at->isNumeric() && !at->isUnknownish()) {
+              error(call.loc, std::string("std.") + f + " requires a numeric argument");
+            }
+            call.type = Type::make(TypeKind::Double);
+            return call.type;
+          }
+        }
+        static const char* kMath2[] = {"atan2", "pow"};
+        for (const char* f : kMath2) {
+          if (m == f) {
+            if (call.args.size() != 2) {
+              error(call.loc, std::string("std.") + f + " requires two arguments");
+            }
+            for (auto& a : call.args) infer(*a.value);
+            call.type = Type::make(TypeKind::Double);
+            return call.type;
+          }
+        }
+      }
+      if (m == "min" || m == "max") {
+        if (call.args.size() != 2) {
+          error(call.loc, std::string("std.") + m + " requires two arguments");
+        }
+        auto a = infer(*call.args[0].value);
+        auto b = infer(*call.args[1].value);
+        call.type = promote(a, b);
+        return call.type;
+      }
+      if (m == "abs") {
+        if (call.args.size() != 1) error(call.loc, "std.abs requires one argument");
+        auto a = infer(*call.args[0].value);
+        if (a->kind == TypeKind::Int || a->kind == TypeKind::Long ||
+            a->kind == TypeKind::Byte) {
+          call.type = a;
+        } else {
+          call.type = Type::make(TypeKind::Double);
+        }
+        return call.type;
+      }
+      if (m == "clamp") {
+        if (call.args.size() != 3) error(call.loc, "std.clamp requires three arguments");
+        for (auto& a : call.args) infer(*a.value);
+        call.type = Type::make(TypeKind::Double);
+        return call.type;
+      }
+      if (m == "lerp") {
+        if (call.args.size() != 3) error(call.loc, "std.lerp requires three arguments");
+        for (auto& a : call.args) infer(*a.value);
+        call.type = Type::make(TypeKind::Double);
         return call.type;
       }
       error(call.loc, "unknown std function 'std." + m + "'");
@@ -757,6 +830,46 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
     }
 
     auto bt = infer(*base);
+    if (bt->kind == TypeKind::Option) {
+      if (callee->member == "ValueOr") {
+        if (call.args.size() != 1) {
+          error(call.loc, "ValueOr requires one default argument");
+        } else {
+          auto at = infer(*call.args[0].value);
+          if (!assignable(bt->inner, at)) {
+            error(call.loc, "ValueOr default expects " + bt->inner->describe() +
+                                ", got " + at->describe());
+          }
+        }
+        call.type = bt->inner ? bt->inner : Type::make(TypeKind::Unknown);
+        return call.type;
+      }
+      error(call.loc, "'Option' has no method '" + callee->member + "'");
+      call.type = Type::make(TypeKind::Error);
+      return call.type;
+    }
+    if (bt->kind == TypeKind::Rng) {
+      const std::string& m = callee->member;
+      if (m == "Next") {
+        if (!call.args.empty()) error(call.loc, "Rng.Next takes no arguments");
+        call.type = Type::make(TypeKind::Long);
+        return call.type;
+      }
+      if (m == "NextInt") {
+        if (call.args.size() != 1) error(call.loc, "Rng.NextInt requires one argument");
+        infer(*call.args[0].value);
+        call.type = Type::make(TypeKind::Long);
+        return call.type;
+      }
+      if (m == "NextDouble") {
+        if (!call.args.empty()) error(call.loc, "Rng.NextDouble takes no arguments");
+        call.type = Type::make(TypeKind::Double);
+        return call.type;
+      }
+      error(call.loc, "'Rng' has no method '" + m + "'");
+      call.type = Type::make(TypeKind::Error);
+      return call.type;
+    }
     if (bt->kind == TypeKind::String) {
       const std::string& m = callee->member;
       auto checkInt = [&](size_t i, const char* what) {

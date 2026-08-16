@@ -24,6 +24,7 @@ enum class TypeKind {
   Snapshot,
   List,
   Map,
+  Rng,
   Self,
   Generic,
   Unknown,

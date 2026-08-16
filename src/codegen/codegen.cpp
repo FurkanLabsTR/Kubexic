@@ -41,6 +41,7 @@ std::string typeSig(const std::shared_ptr<Type>& t) {
     case TypeKind::Option: return "opt_" + (t->inner ? typeSig(t->inner) : std::string("?"));
     case TypeKind::Struct: return "struct_" + t->name;
     case TypeKind::Enum: return "enum_" + t->name;
+    case TypeKind::Rng: return "rng";
     case TypeKind::List: return "list_" + (t->inner ? typeSig(t->inner) : std::string("x"));
     case TypeKind::Map:
       return "map_" + (t->inner ? typeSig(t->inner) : std::string("x")) + "_" +
@@ -497,6 +498,7 @@ llvm::Type* Codegen::llvmType(const std::shared_ptr<Type>& t) {
     case TypeKind::Enum: return llvm::Type::getInt32Ty(ctx_);
     case TypeKind::List:
     case TypeKind::Map:
+    case TypeKind::Rng:
       return llvm::Type::getInt64Ty(ctx_);
     default: return llvm::Type::getInt64Ty(ctx_);
   }
@@ -1204,7 +1206,27 @@ llvm::Value* Codegen::genCall(const Expr& call) {
         return nullptr;
       }
       if (member == "log") {
+        llvm::Value* lvl = call.args.empty()
+                               ? llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0))
+                               : valToI64(genExpr(*call.args[0].value));
+        llvm::Value* msg = call.args.size() < 2
+                               ? builder_.CreateGlobalStringPtr("")
+                               : toStr(genExpr(*call.args[1].value), call.args[1].value->type);
+        auto f = runtimeFn("kx_log", llvm::Type::getVoidTy(ctx_),
+                           {llvm::Type::getInt64Ty(ctx_), llvm::PointerType::get(ctx_, 0)});
+        builder_.CreateCall(f, {lvl, msg});
         return nullptr;
+      }
+      if (member == "pollLine") {
+        auto f = runtimeFn("kx_poll_line", llvm::PointerType::get(ctx_, 0), {});
+        auto val = builder_.CreateCall(f, {});
+        auto present = builder_.CreateIsNotNull(val);
+        auto optTy = llvm::StructType::get(ctx_, {llvm::Type::getInt1Ty(ctx_),
+                                                  llvm::PointerType::get(ctx_, 0)});
+        llvm::Value* opt = llvm::UndefValue::get(optTy);
+        opt = builder_.CreateInsertValue(opt, present, 0);
+        opt = builder_.CreateInsertValue(opt, val, 1);
+        return opt;
       }
       if (member == "rng") {
         llvm::Value* arg = call.args.empty()
@@ -1214,6 +1236,77 @@ llvm::Value* Codegen::genCall(const Expr& call) {
         if (!f) f = declareRuntime("kx_rng_seed", llvm::Type::getInt64Ty(ctx_),
                                    {llvm::Type::getInt64Ty(ctx_)});
         return builder_.CreateCall(f, {arg});
+      }
+      {
+        static const char* kMath1[] = {"sqrt",  "sin",  "cos",  "tan",  "asin", "acos",
+                                       "atan",  "exp",  "log",  "log2", "log10",
+                                       "floor", "ceil", "round"};
+        for (const char* f : kMath1) {
+          if (member == f) {
+            auto arg = call.args.empty()
+                           ? llvm::ConstantFP::get(llvm::Type::getDoubleTy(ctx_), 0.0)
+                           : coerce(genExpr(*call.args[0].value),
+                                    llvm::Type::getDoubleTy(ctx_));
+            auto fn = runtimeFn(f, llvm::Type::getDoubleTy(ctx_),
+                                {llvm::Type::getDoubleTy(ctx_)});
+            return builder_.CreateCall(fn, {arg});
+          }
+        }
+        static const char* kMath2[] = {"atan2", "pow"};
+        for (const char* f : kMath2) {
+          if (member == f) {
+            auto a = coerce(genExpr(*call.args[0].value), llvm::Type::getDoubleTy(ctx_));
+            auto b = coerce(genExpr(*call.args[1].value), llvm::Type::getDoubleTy(ctx_));
+            auto fn = runtimeFn(f, llvm::Type::getDoubleTy(ctx_),
+                                {llvm::Type::getDoubleTy(ctx_), llvm::Type::getDoubleTy(ctx_)});
+            return builder_.CreateCall(fn, {a, b});
+          }
+        }
+      }
+      if (member == "min" || member == "max") {
+        auto at = call.args[0].value->type;
+        auto a = genExpr(*call.args[0].value);
+        auto b = genExpr(*call.args[1].value);
+        auto ty = llvmType(at);
+        a = coerce(a, ty);
+        b = coerce(b, ty);
+        llvm::Value* lt;
+        if (ty->isFloatingPointTy()) {
+          lt = builder_.CreateFCmp(llvm::CmpInst::FCMP_OLT, a, b);
+        } else {
+          lt = builder_.CreateICmp(llvm::CmpInst::ICMP_SLT, a, b);
+        }
+        return builder_.CreateSelect(member == "min" ? lt : builder_.CreateNot(lt), a, b);
+      }
+      if (member == "abs") {
+        auto at = call.args[0].value->type;
+        auto a = genExpr(*call.args[0].value);
+        if (at && at->kind == TypeKind::Int) {
+          auto neg = builder_.CreateNeg(a);
+          auto isNeg = builder_.CreateICmp(llvm::CmpInst::ICMP_SLT, a,
+                                           llvm::ConstantInt::get(a->getType(), 0));
+          return builder_.CreateSelect(isNeg, neg, a);
+        }
+        auto f = runtimeFn("fabs", llvm::Type::getDoubleTy(ctx_),
+                           {llvm::Type::getDoubleTy(ctx_)});
+        return builder_.CreateCall(f, {coerce(a, llvm::Type::getDoubleTy(ctx_))});
+      }
+      if (member == "clamp" || member == "lerp") {
+        auto f = member == "clamp"
+                     ? runtimeFn("kx_clamp", llvm::Type::getDoubleTy(ctx_),
+                                 {llvm::Type::getDoubleTy(ctx_), llvm::Type::getDoubleTy(ctx_),
+                                  llvm::Type::getDoubleTy(ctx_)})
+                     : runtimeFn("kx_lerp", llvm::Type::getDoubleTy(ctx_),
+                                 {llvm::Type::getDoubleTy(ctx_), llvm::Type::getDoubleTy(ctx_),
+                                  llvm::Type::getDoubleTy(ctx_)});
+        std::vector<llvm::Value*> args;
+        for (auto& a : call.args) {
+          args.push_back(coerce(genExpr(*a.value), llvm::Type::getDoubleTy(ctx_)));
+        }
+        while (args.size() < 3) {
+          args.push_back(llvm::ConstantFP::get(llvm::Type::getDoubleTy(ctx_), 0.0));
+        }
+        return builder_.CreateCall(f, args);
       }
       return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
     }
@@ -1253,6 +1346,39 @@ llvm::Value* Codegen::genCall(const Expr& call) {
       if (m == "Lower") {
         auto f = runtimeFn("kx_str_lower", ptr, {ptr});
         return builder_.CreateCall(f, {obj});
+      }
+      return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
+    }
+    if (base && base->type && base->type->kind == TypeKind::Option) {
+      llvm::Value* obj = genExpr(*base);
+      if (member == "ValueOr") {
+        auto dflt = genExpr(*call.args[0].value);
+        auto present = builder_.CreateExtractValue(obj, 0);
+        auto value = builder_.CreateExtractValue(obj, 1);
+        return builder_.CreateSelect(present, value, dflt);
+      }
+      return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
+    }
+    if (base && base->type && base->type->kind == TypeKind::Rng) {
+      llvm::Value* obj = genExpr(*base);
+      auto nextFn = runtimeFn("kx_rng_next", llvm::Type::getInt64Ty(ctx_),
+                              {llvm::Type::getInt64Ty(ctx_)});
+      auto nxt = builder_.CreateCall(nextFn, {obj});
+      storeTo(*base, nxt);
+      if (member == "Next") {
+        return nxt;
+      }
+      if (member == "NextInt") {
+        auto n = valToI64(genExpr(*call.args[0].value));
+        auto zero = llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
+        auto rem = builder_.CreateSRem(nxt, n);
+        auto safe = builder_.CreateICmp(llvm::CmpInst::ICMP_SLT, rem, zero);
+        return builder_.CreateSelect(safe, builder_.CreateAdd(rem, n), rem);
+      }
+      if (member == "NextDouble") {
+        auto f = runtimeFn("kx_rng_next_double", llvm::Type::getDoubleTy(ctx_),
+                           {llvm::Type::getInt64Ty(ctx_)});
+        return builder_.CreateCall(f, {nxt});
       }
       return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
     }
@@ -1842,7 +1968,8 @@ bool Codegen::emitObject(const std::string& objectPath) {
 bool Codegen::emitExecutable(const std::string& objectPath, const std::string& runtimeObject,
                              const std::string& outputPath) {
   if (!emitObject(objectPath)) return false;
-  std::string cmd = "gcc " + objectPath + " " + runtimeObject + " -lpthread -o " + outputPath;
+  std::string cmd = "gcc " + objectPath + " " + runtimeObject + " -lpthread -lm -o " +
+                    outputPath;
   int rc = std::system(cmd.c_str());
   if (rc != 0) {
     errors_.push_back("codegen: linking failed");
