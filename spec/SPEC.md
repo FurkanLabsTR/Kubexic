@@ -415,6 +415,34 @@ int main() {
 | `std.exit(code)` | anywhere | Terminates the process immediately with exit code |
 | `std.log(level, msg)` | anywhere | Deterministic, ordered logging |
 
+### 13.1b Control flow (extended)
+
+- `switch (expr) { case v1: ... case v2, v3: ... default: ... }` — shared
+  labels, `break`/`return`/`continue` terminators required, string cases use
+  content comparison.
+
+### 13.1c Strings
+
+- `Length` (property), `Substring(start, len)`, `Contains(s)`,
+  `StartsWith(s)`, `EndsWith(s)`, `Upper()`, `Lower()`.
+- `==`/`!=` compare content (not pointers).
+
+### 13.1d Functions and operators
+
+- Overloading by arity: `var F(a)` and `var F(a, b)` coexist; calls resolve
+  by argument count.
+- Operator overloading via convention functions: `op_add`, `op_sub`,
+  `op_mul`, `op_div`, `op_mod`, `op_eq`, `op_ne`, `op_lt`, `op_le`, `op_gt`,
+  `op_ge` (two parameters, declared like any function). Triggered when either
+  operand is a struct; the return type is inferred from the operator body.
+  Enables `Vec3`-style value types.
+
+### 13.1e Extern (C interop)
+
+- `extern double sqrt(double x);` — typed parameters (the one place type
+  names appear), calls coerce arguments, symbols linked by name.
+- `[Link("m")] extern ...` — adds `-lm` (or any library) to the link command.
+
 ### 13.2 Collections, math, rng
 
 - `List<T>` — `Add(x)`, `Get(i)`, `Set(i, x)`, `RemoveAt(i)`, `Clear()`, `Count`
@@ -423,7 +451,19 @@ int main() {
   `Count` (property).
 - Element types: `int`, `long`, `float`, `double`, `bool`, `string`, `EntityId`.
   Nested collections are not supported yet.
-- Constructed with `List<int>()`, `Map<string, int>()`.
+- Constructed with `List<int>()`, `Map<string, int>()`. In `spawn` and
+  `attach` initializers, a fresh `List()/Map()` constructor is **taken** by
+  the entity (no copy) — ownership transfers.
+- `std.sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `pow`,
+  `exp`, `log`, `log2`, `log10`, `floor`, `ceil`, `round` (double),
+  `min`, `max`, `abs`, `clamp(x,lo,hi)`, `lerp(a,b,t)`.
+- `std.rng(seed)` → `Rng`; `r.Next()` (long), `r.NextInt(n)` (0..n-1),
+  `r.NextDouble()` (0..1). Deterministic LCG: same seed → same sequence on
+  any core count.
+- `std.log(level, msg)` — stderr.
+- `std.pollLine()` → `Option<string>` — non-blocking stdin; the coordinator
+  polls once per tick, lines queue deterministically (works in systems).
+- `opt.ValueOr(default)` on any `T?` value.
 - Ownership semantics (ownership trees): a collection stored in a component
   field belongs to that entity — deep-copied when written to a field or frozen
   into the bulletin board, and freed when the entity despawns or the component
@@ -617,7 +657,20 @@ Core guarantees verified end-to-end:
 - **Migration invariance** — forced migration produces byte-identical results
 - **Determinism** — repeated runs identical
 
-Run with `kxc build <dir> <out>`; `KUBEXIC_CORES` env var controls box count (default: all cores).
+Run with `kxc build <dir> <out>`; `kxc run <dir>`; `kxc fmt <file>`;
+`kxc fmt-dir <dir>`; `KUBEXIC_CORES` env var controls box count (default:
+all cores); `KX_TRACE=1` traces every attach/detach/despawn request with
+component names.
+
+### 21.1 Memory-safety status
+
+Ownership trees are fully enforced for stored data: collections and strings
+in fields/collections are dup'd on store, deep-copied into the frozen view,
+and freed on despawn/detach/freeze-overwrite. Verified with AddressSanitizer
+on a despawn-heavy 2000-entity stress sample (1 and 8 boxes): zero memory
+errors, zero collection leaks. Known caveat: string temporaries built at
+runtime (interpolation results, `readln`, `Upper()` etc.) that are never
+stored leak until process exit — bounded and benign.
 
 ---
 
