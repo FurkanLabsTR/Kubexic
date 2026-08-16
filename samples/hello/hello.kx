@@ -1,0 +1,55 @@
+// hello.kx — sequential program exercising the M4 codegen
+const Greeting = "hello, kubexic";
+
+struct Point {
+    var x = 0.0;
+    var y = 0.0;
+}
+
+var Dist(a, b) {
+    var dx = a.x - b.x;
+    var dy = a.y - b.y;
+    return dx * dx + dy * dy;
+}
+
+var Sum(n) {
+    var total = 0;
+    for (var i = 1; i <= n; i++) {
+        total += i;
+    }
+    return total;
+}
+
+int main() {
+    std.println(Greeting);
+
+    var p = Point { x = 3, y = 4 };
+    std.println($"point: ({p.x}, {p.y})");
+    std.println($"dist: {Dist(p, Point { x = 0, y = 0 })}");
+
+    var n = 100;
+    std.println($"sum 1..{n} = {Sum(n)}");
+
+    var i = 0;
+    while (i < 3) {
+        i += 1;
+        if (i == 2) {
+            continue;
+        }
+        std.println($"while: {i}");
+    }
+
+    var flag = true;
+    if (flag && 5 > 3) {
+        std.println("logic ok");
+    } else {
+        std.println("logic broken");
+    }
+
+    var pi = 3.14159;
+    std.println($"pi = {pi}");
+
+    std.exit(0);
+    std.println("never printed");
+    return 0;
+}

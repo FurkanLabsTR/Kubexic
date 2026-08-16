@@ -13,3 +13,10 @@ target_include_directories(kubexic_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/sema
   ${CMAKE_CURRENT_SOURCE_DIR}/mir
 )
+
+add_library(kubexic_codegen STATIC codegen/codegen.cpp)
+target_include_directories(kubexic_codegen PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/codegen
+)
+target_link_libraries(kubexic_codegen PRIVATE kubexic_core LLVM)

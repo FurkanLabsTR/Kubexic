@@ -19,6 +19,12 @@ class Checker {
   const std::map<std::string, const Decl*>& components() const { return components_; }
   const std::map<std::string, const Decl*>& systems() const { return systems_; }
   const std::map<std::string, const Decl*>& tags() const { return tags_; }
+  const std::map<std::string, const Decl*>& structs() const { return structs_; }
+  const std::map<std::string, const Decl*>& enums() const { return enums_; }
+  const Decl* functionByName(const std::string& name) const;
+  bool constValue(const std::string& name, ConstValue* out) const;
+  std::shared_ptr<Type> reInferBody(const std::vector<StmtPtr>& body,
+                                    const std::map<std::string, std::shared_ptr<Type>>& params);
 
  private:
   struct Local {

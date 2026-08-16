@@ -58,6 +58,7 @@ struct Expr {
     Is,
     Interpolated,
     Spawn,
+    StructInit,
   };
 
   Kind kind;
@@ -90,6 +91,7 @@ struct Expr {
 
   std::vector<ComponentInit> spawnInits;
   std::vector<std::string> spawnTags;
+  ComponentInit structInit;
 
   static ExprPtr makeInt(std::int64_t v, SourceLoc loc);
   static ExprPtr makeFloat(double v, bool isFloat, SourceLoc loc);

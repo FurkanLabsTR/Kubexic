@@ -172,6 +172,37 @@ void Checker::checkAttributes(const Decl& d) {
   }
 }
 
+const Decl* Checker::functionByName(const std::string& name) const {
+  auto it = functions_.find(name);
+  return it == functions_.end() ? nullptr : it->second;
+}
+
+bool Checker::constValue(const std::string& name, ConstValue* out) const {
+  auto it = consts_.find(name);
+  if (it == consts_.end()) return false;
+  if (out) *out = it->second;
+  return true;
+}
+
+std::shared_ptr<Type> Checker::reInferBody(
+    const std::vector<StmtPtr>& body,
+    const std::map<std::string, std::shared_ptr<Type>>& params) {
+  size_t mark = errors_.size();
+  auto savedRet = curFnRet_;
+  auto savedVarRet = varRetType_;
+  varRetType_ = nullptr;
+  curFnRet_ = "var";
+  pushScope();
+  for (const auto& [n, t] : params) addLocal(n, t);
+  for (const auto& s : body) checkStmt(*s);
+  auto result = varRetType_;
+  popScope();
+  curFnRet_ = savedRet;
+  varRetType_ = savedVarRet;
+  errors_.resize(mark);
+  return result;
+}
+
 void Checker::pushScope() { scopes_.emplace_back(); }
 
 void Checker::popScope() { scopes_.pop_back(); }
@@ -490,6 +521,10 @@ std::shared_ptr<Type> Checker::infer(Expr& e) {
       e.type = Type::make(TypeKind::EntityId);
       return e.type;
     }
+    case Expr::Kind::StructInit: {
+      e.type = checkComponentInit(e.structInit);
+      return e.type;
+    }
   }
   e.type = Type::make(TypeKind::Error);
   return e.type;
@@ -624,15 +659,17 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
 }
 
 std::shared_ptr<Type> Checker::checkComponentInit(const ComponentInit& ci) {
-  if (!componentByName(ci.type)) {
-    error(SourceLoc{0, 0}, "'" + ci.type + "' is not a component");
+  const Decl* comp = componentByName(ci.type);
+  const Decl* st = structByName(ci.type);
+  if (!comp && !st) {
+    error(SourceLoc{0, 0}, "'" + ci.type + "' is not a component or struct");
     return Type::make(TypeKind::Error);
   }
-  const auto& fields = componentFields_[ci.type];
+  const auto& fields = comp ? componentFields_[ci.type] : structFields_[ci.type];
   for (const auto& f : ci.fields) {
     auto fit = fields.find(f.first);
     if (fit == fields.end()) {
-      error(SourceLoc{0, 0}, "component '" + ci.type + "' has no field '" + f.first + "'");
+      error(SourceLoc{0, 0}, "'" + ci.type + "' has no field '" + f.first + "'");
       continue;
     }
     auto vt = infer(*f.second);
@@ -641,7 +678,7 @@ std::shared_ptr<Type> Checker::checkComponentInit(const ComponentInit& ci) {
                                  fit->second->describe() + ", got " + vt->describe());
     }
   }
-  return Type::component(ci.type);
+  return comp ? Type::component(ci.type) : Type::structType(ci.type);
 }
 
 void Checker::checkBlock(std::vector<StmtPtr>& body) {

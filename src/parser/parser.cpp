@@ -98,6 +98,7 @@ const char* exprKindName(Expr::Kind k) {
     case Expr::Kind::Is: return "is";
     case Expr::Kind::Interpolated: return "interpolated";
     case Expr::Kind::Spawn: return "spawn";
+    case Expr::Kind::StructInit: return "structinit";
   }
   return "?";
 }
@@ -185,6 +186,14 @@ void dumpExpr(const Expr& e, std::ostream& out) {
         out << ")";
       }
       for (const auto& t : e.spawnTags) out << " tag:" << t;
+      break;
+    case Expr::Kind::StructInit:
+      out << " (" << e.structInit.type;
+      for (const auto& f : e.structInit.fields) {
+        out << " " << f.first << "=";
+        dumpExpr(*f.second, out);
+      }
+      out << ")";
       break;
   }
   out << ")";
@@ -1161,6 +1170,13 @@ ExprPtr Parser::parsePrimary() {
       advance();
       return Expr::makeBool(false, loc);
     case TokenKind::Identifier: {
+      if (peekAt(1).kind == TokenKind::LBrace) {
+        auto e = std::make_unique<Expr>();
+        e->kind = Expr::Kind::StructInit;
+        e->loc = SourceLoc{peek().line, peek().col};
+        e->structInit = parseComponentInit();
+        return e;
+      }
       auto e = Expr::makeIdentifier(peek().text, loc);
       advance();
       return e;

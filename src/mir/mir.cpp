@@ -168,6 +168,9 @@ void Mir::walkExpr(const Expr& e, const Checker& c, SystemAnalysis& out) {
         for (const auto& f : ci.fields) walkExpr(*f.second, c, out);
       }
       break;
+    case Expr::Kind::StructInit:
+      for (const auto& f : e.structInit.fields) walkExpr(*f.second, c, out);
+      break;
     case Expr::Kind::IntLit:
     case Expr::Kind::FloatLit:
     case Expr::Kind::StringLit:
