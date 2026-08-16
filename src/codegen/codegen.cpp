@@ -176,7 +176,7 @@ void Codegen::declareEcsRuntime() {
   runtimeFn("kx_snap_read_i64", i64, {i64, i32, i32});
   runtimeFn("kx_snap_read_f64", f64, {i64, i32, i32});
   runtimeFn("kx_snap_read_str", ptr, {i64, i32, i32});
-  runtimeFn("kx_run", voidTy, {i32, i64});
+  runtimeFn("kx_run", voidTy, {i32, i64, f64});
   runtimeFn("kx_stop", voidTy, {});
   runtimeFn("kx_get_dt", f64, {});
   runtimeFn("kx_get_tick", i64, {});
@@ -951,6 +951,7 @@ llvm::Value* Codegen::genCall(const Expr& call) {
     if (name == "run") {
       int tps = 0;
       long long ticks = -1;
+      double cores = -1.0;
       if (!call.args.empty() && call.args[0].value->kind == Expr::Kind::IntLit) {
         tps = (int)call.args[0].value->intValue;
       }
@@ -958,11 +959,17 @@ llvm::Value* Codegen::genCall(const Expr& call) {
         if (a.name == "ticks" && a.value->kind == Expr::Kind::IntLit) {
           ticks = a.value->intValue;
         }
+        if (a.name == "cores") {
+          if (a.value->kind == Expr::Kind::IntLit) cores = (double)a.value->intValue;
+          else if (a.value->kind == Expr::Kind::FloatLit) cores = a.value->floatValue;
+        }
       }
       auto f = runtimeFn("kx_run", llvm::Type::getVoidTy(ctx_),
-                         {llvm::Type::getInt32Ty(ctx_), llvm::Type::getInt64Ty(ctx_)});
+                         {llvm::Type::getInt32Ty(ctx_), llvm::Type::getInt64Ty(ctx_),
+                          llvm::Type::getDoubleTy(ctx_)});
       builder_.CreateCall(f, {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), tps),
-                              llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), ticks)});
+                              llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), ticks),
+                              llvm::ConstantFP::get(llvm::Type::getDoubleTy(ctx_), cores)});
       return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
     }
     if (name == "panic") {
@@ -1379,7 +1386,7 @@ bool Codegen::emitObject(const std::string& objectPath) {
 bool Codegen::emitExecutable(const std::string& objectPath, const std::string& runtimeObject,
                              const std::string& outputPath) {
   if (!emitObject(objectPath)) return false;
-  std::string cmd = "gcc " + objectPath + " " + runtimeObject + " -o " + outputPath;
+  std::string cmd = "gcc " + objectPath + " " + runtimeObject + " -lpthread -o " + outputPath;
   int rc = std::system(cmd.c_str());
   if (rc != 0) {
     errors_.push_back("codegen: linking failed");

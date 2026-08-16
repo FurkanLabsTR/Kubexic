@@ -30,8 +30,9 @@ PASS=$((PASS + 1))
 echo "e2e hello: PASS"
 
 ./build/kxc build samples/ecs build/e2e_ecs
-OUTPUT=$(timeout 10 ./build/e2e_ecs)
-EXPECTED="spawned: 1, 65537, 131073
+
+GOLDEN=$(KUBEXIC_CORES=1 timeout 10 ./build/e2e_ecs)
+EXPECTED="spawned 3 entities
 tick 1: max counter seen = 1
 tick 2: max counter seen = 2
 tick 3: max counter seen = 3
@@ -42,22 +43,32 @@ tick 4: counter hit 5
 tick 5: max counter seen = 5
 tick 6: max counter seen = 6
 world done"
-if [ "$OUTPUT" != "$EXPECTED" ]; then
-  echo "e2e ecs: FAIL"
+if [ "$GOLDEN" != "$EXPECTED" ]; then
+  echo "e2e ecs (1 box): FAIL"
   echo "--- expected ---"; echo "$EXPECTED"
-  echo "--- got ---"; echo "$OUTPUT"
+  echo "--- got ---"; echo "$GOLDEN"
   exit 1
 fi
 PASS=$((PASS + 1))
-echo "e2e ecs: PASS"
+echo "e2e ecs (1 box): PASS"
 
-OUTPUT2=$(timeout 10 ./build/e2e_ecs)
-if [ "$OUTPUT" != "$OUTPUT2" ]; then
-  echo "e2e determinism: FAIL (two runs differ)"
+MULTI=$(KUBEXIC_CORES=8 timeout 10 ./build/e2e_ecs)
+if [ "$MULTI" != "$GOLDEN" ]; then
+  echo "e2e ecs (8 boxes): FAIL — differs from single-box run"
+  echo "--- 1 box ---"; echo "$GOLDEN"
+  echo "--- 8 boxes ---"; echo "$MULTI"
   exit 1
 fi
 PASS=$((PASS + 1))
-echo "e2e determinism: PASS"
+echo "e2e core-count invariance (1 box == 8 boxes): PASS"
 
-echo "e2e: $PASS/3 checks passed"
+MULTI2=$(KUBEXIC_CORES=8 timeout 10 ./build/e2e_ecs)
+if [ "$MULTI2" != "$MULTI" ]; then
+  echo "e2e determinism: FAIL (8-box runs differ)"
+  exit 1
+fi
+PASS=$((PASS + 1))
+echo "e2e determinism (8 boxes, two runs): PASS"
+
+echo "e2e: $PASS/4 checks passed"
 exit 0

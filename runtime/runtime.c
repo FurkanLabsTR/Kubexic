@@ -1,29 +1,69 @@
+#define _GNU_SOURCE
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define KX_MAX_COMPONENTS 64
 #define KX_MAX_FIELDS 16
+#define KX_MAX_BOXES 256
 #define KX_INIT_ENTITIES 256
 #define KX_MAX_TAGS 64
+#define KX_BUF_CAP 4096
 
 typedef long long kx_entity;
 
+/* ---- request queue (deterministic cross-box mutation) ---- */
+
+typedef enum {
+  REQ_ENSURE,
+  REQ_WRITE_I64,
+  REQ_WRITE_F64,
+  REQ_WRITE_STR,
+  REQ_DETACH,
+  REQ_DESPAWN,
+} kx_req_kind;
+
+typedef struct {
+  int kind;
+  int comp;
+  int field;
+  long long v;
+} kx_req;
+
+/* ---- per-box entity store ---- */
+
+typedef struct {
+  pthread_mutex_t allocLock;
+  long long* tagMasks;
+  long long* compMasks;
+  int* gens;
+  int size;
+  int cap;
+
+  kx_req** queues;
+  int* qSize;
+  int* qCap;
+
+  long long* fIds;
+  long long* fTags;
+  long long* fComps;
+  long long fSize;
+  void** fFields;
+} kx_box;
+
 static int g_compCount;
 static int g_fieldCounts[KX_MAX_COMPONENTS];
-static void** g_fields;
-static void** g_frozenFields;
-
-static long long* g_tagMasks;
-static long long* g_compMasks;
-static int* g_gens;
-static int g_size;
-static int g_cap;
+static int g_boxCount = 1;
+static int g_maxBoxes = KX_MAX_BOXES;
+static kx_box* g_boxes;
 
 static long long* g_frozenIds;
 static long long* g_frozenTagMasks;
 static long long* g_frozenCompMasks;
+static void** g_frozenFields;
 static long long g_frozenSize;
 
 static int g_sysCount;
@@ -37,59 +77,193 @@ static long long g_tick;
 static double g_dt;
 static volatile int g_stop;
 
-static int slotAlive(long long slot) {
-  return slot >= 0 && slot < g_size && g_gens[slot] != 0;
+static long long g_spawnCounter;
+static pthread_mutex_t g_spawnLock = PTHREAD_MUTEX_INITIALIZER;
+
+/* ---- output buffers (deterministic flush order) ---- */
+
+typedef struct {
+  char data[KX_BUF_CAP];
+  int len;
+} kx_buffer;
+
+static kx_buffer g_buffers[KX_MAX_BOXES + 1];
+
+static _Thread_local int g_currentBuffer = -1;
+
+static void bufAppend(int idx, const char* s) {
+  if (idx < 0 || idx > KX_MAX_BOXES) return;
+  kx_buffer* b = &g_buffers[idx];
+  size_t n = strlen(s);
+  if (b->len + (int)n >= KX_BUF_CAP) {
+    fwrite(b->data, 1, b->len, stdout);
+    b->len = 0;
+  }
+  memcpy(b->data + b->len, s, n);
+  b->len += (int)n;
 }
 
-static kx_entity slotEntity(long long slot) {
-  return (slot << 16) | (g_gens[slot] & 0xFFFF);
+static void bufFlush(int idx) {
+  if (idx < 0 || idx > KX_MAX_BOXES) return;
+  if (g_buffers[idx].len > 0) {
+    fwrite(g_buffers[idx].data, 1, g_buffers[idx].len, stdout);
+    g_buffers[idx].len = 0;
+  }
 }
 
-static int entitySlot(kx_entity e) { return (int)(e >> 16); }
+static int entityBox(kx_entity e) { return (int)(e >> 48); }
+
+static int entitySlot(kx_entity e) { return (int)((e >> 16) & 0xFFFFFFFFLL); }
 
 static int entityGen(kx_entity e) { return (int)(e & 0xFFFF); }
 
-static int entityAlive(kx_entity e) {
-  long long slot = entitySlot(e);
-  return slotAlive(slot) && entityGen(e) == g_gens[slot];
+static int slotAlive(kx_box* b, long long slot) {
+  return slot >= 0 && slot < b->size && b->gens[slot] != 0;
 }
 
-static void growStore(void) {
-  int newCap = g_cap * 2;
-  g_tagMasks = (long long*)realloc(g_tagMasks, sizeof(long long) * newCap);
-  g_compMasks = (long long*)realloc(g_compMasks, sizeof(long long) * newCap);
-  g_gens = (int*)realloc(g_gens, sizeof(int) * newCap);
+static int entityAlive(kx_entity e) {
+  int box = entityBox(e);
+  if (box < 0 || box >= g_boxCount) return 0;
+  kx_box* b = &g_boxes[box];
+  long long slot = entitySlot(e);
+  return slotAlive(b, slot) && entityGen(e) == b->gens[slot];
+}
+
+static void growBox(kx_box* b) {
+  int newCap = b->cap * 2;
+  b->tagMasks = (long long*)realloc(b->tagMasks, sizeof(long long) * newCap);
+  b->compMasks = (long long*)realloc(b->compMasks, sizeof(long long) * newCap);
+  b->gens = (int*)realloc(b->gens, sizeof(int) * newCap);
   for (int c = 0; c < g_compCount; c++) {
     for (int f = 0; f < g_fieldCounts[c]; f++) {
-      g_fields[c * KX_MAX_FIELDS + f] = realloc(g_fields[c * KX_MAX_FIELDS + f], 8 * newCap);
-      g_frozenFields[c * KX_MAX_FIELDS + f] =
-          realloc(g_frozenFields[c * KX_MAX_FIELDS + f], 8 * newCap);
+      b->fFields[c * KX_MAX_FIELDS + f] =
+          realloc(b->fFields[c * KX_MAX_FIELDS + f], 8 * newCap);
     }
   }
-  g_frozenIds = (long long*)realloc(g_frozenIds, sizeof(long long) * newCap);
-  g_frozenTagMasks = (long long*)realloc(g_frozenTagMasks, sizeof(long long) * newCap);
-  g_frozenCompMasks = (long long*)realloc(g_frozenCompMasks, sizeof(long long) * newCap);
-  g_cap = newCap;
+  b->fIds = (long long*)realloc(b->fIds, sizeof(long long) * newCap);
+  b->fTags = (long long*)realloc(b->fTags, sizeof(long long) * newCap);
+  b->fComps = (long long*)realloc(b->fComps, sizeof(long long) * newCap);
+  b->cap = newCap;
 }
+
+static void createBoxes(int count) {
+  if (count < 1) count = 1;
+  if (count > KX_MAX_BOXES) count = KX_MAX_BOXES;
+  if (g_boxes && g_boxCount == count) return;
+  if (g_boxes) {
+    for (int i = 0; i < g_boxCount; i++) {
+      free(g_boxes[i].tagMasks);
+      free(g_boxes[i].compMasks);
+      free(g_boxes[i].gens);
+      for (int c = 0; c < g_compCount; c++) {
+        for (int f = 0; f < g_fieldCounts[c]; f++) free(g_boxes[i].fFields[c * KX_MAX_FIELDS + f]);
+      }
+      for (int s = 0; s < count; s++) {
+        free(g_boxes[i].queues[s]);
+        free(g_boxes[i].qSize);
+      }
+      free(g_boxes[i].queues);
+      free(g_boxes[i].qSize);
+      free(g_boxes[i].qCap);
+      free(g_boxes[i].fIds);
+      free(g_boxes[i].fTags);
+      free(g_boxes[i].fComps);
+      free(g_boxes[i].fFields);
+      pthread_mutex_destroy(&g_boxes[i].allocLock);
+    }
+    free(g_boxes);
+    g_boxes = NULL;
+  }
+  g_boxCount = count;
+  g_boxes = (kx_box*)calloc(count, sizeof(kx_box));
+  for (int i = 0; i < count; i++) {
+    kx_box* b = &g_boxes[i];
+    pthread_mutex_init(&b->allocLock, NULL);
+    b->cap = KX_INIT_ENTITIES;
+    b->tagMasks = (long long*)calloc(b->cap, sizeof(long long));
+    b->compMasks = (long long*)calloc(b->cap, sizeof(long long));
+    b->gens = (int*)calloc(b->cap, sizeof(int));
+    b->fFields = (void**)calloc(g_compCount * KX_MAX_FIELDS, sizeof(void*));
+    for (int c = 0; c < g_compCount; c++) {
+      for (int f = 0; f < g_fieldCounts[c]; f++) {
+        b->fFields[c * KX_MAX_FIELDS + f] = calloc(8, b->cap);
+      }
+    }
+    b->fIds = (long long*)calloc(b->cap, sizeof(long long));
+    b->fTags = (long long*)calloc(b->cap, sizeof(long long));
+    b->fComps = (long long*)calloc(b->cap, sizeof(long long));
+    b->queues = (kx_req**)calloc(count + 1, sizeof(kx_req*));
+    b->qSize = (int*)calloc(count + 1, sizeof(int));
+    b->qCap = (int*)calloc(count + 1, sizeof(int));
+    for (int s = 0; s < count + 1; s++) {
+      b->qCap[s] = 64;
+      b->queues[s] = (kx_req*)malloc(sizeof(kx_req) * 64);
+    }
+  }
+  g_frozenIds = (long long*)realloc(g_frozenIds, sizeof(long long) * g_boxCount * KX_INIT_ENTITIES);
+  g_frozenTagMasks =
+      (long long*)realloc(g_frozenTagMasks, sizeof(long long) * g_boxCount * KX_INIT_ENTITIES);
+  g_frozenCompMasks =
+      (long long*)realloc(g_frozenCompMasks, sizeof(long long) * g_boxCount * KX_INIT_ENTITIES);
+}
+
+/* ---- mutation queue (single writer per source: deterministic) ---- */
+
+static void enqueue(kx_box* box, int source, kx_req r) {
+  if (box->qSize[source] >= box->qCap[source]) {
+    box->qCap[source] *= 2;
+    box->queues[source] =
+        (kx_req*)realloc(box->queues[source], sizeof(kx_req) * box->qCap[source]);
+  }
+  box->queues[source][box->qSize[source]++] = r;
+}
+
+static void applyRequest(kx_box* b, kx_entity e, const kx_req* r) {
+  long long slot = entitySlot(e);
+  if (!slotAlive(b, slot) || entityGen(e) != b->gens[slot]) return;
+  switch (r->kind) {
+    case REQ_ENSURE:
+      b->compMasks[slot] |= (1LL << r->comp);
+      break;
+    case REQ_WRITE_I64:
+      ((long long*)b->fFields[r->comp * KX_MAX_FIELDS + r->field])[slot] = r->v;
+      break;
+    case REQ_WRITE_F64: {
+      double d;
+      memcpy(&d, &r->v, 8);
+      ((double*)b->fFields[r->comp * KX_MAX_FIELDS + r->field])[slot] = d;
+      break;
+    }
+    case REQ_WRITE_STR:
+      ((char**)b->fFields[r->comp * KX_MAX_FIELDS + r->field])[slot] = (char*)r->v;
+      break;
+    case REQ_DETACH:
+      b->compMasks[slot] &= ~(1LL << r->comp);
+      break;
+    case REQ_DESPAWN: {
+      b->gens[slot] = (b->gens[slot] + 1) & 0xFFFF;
+      if (b->gens[slot] == 0) b->gens[slot] = 1;
+      b->tagMasks[slot] = 0;
+      b->compMasks[slot] = 0;
+      break;
+    }
+  }
+}
+
+static void commitBox(kx_box* b) {
+  for (int src = 0; src <= g_boxCount; src++) {
+    for (int i = 0; i < b->qSize[src]; i++) {
+      applyRequest(b, b->queues[src][i].v, &b->queues[src][i]);
+    }
+    b->qSize[src] = 0;
+  }
+}
+
+/* ---- public API ---- */
 
 void kx_init(int compCount, const int* fieldCounts) {
   g_compCount = compCount < KX_MAX_COMPONENTS ? compCount : KX_MAX_COMPONENTS;
-  g_cap = KX_INIT_ENTITIES;
   for (int c = 0; c < g_compCount; c++) g_fieldCounts[c] = fieldCounts[c];
-  g_fields = (void**)calloc(g_compCount * KX_MAX_FIELDS, sizeof(void*));
-  g_frozenFields = (void**)calloc(g_compCount * KX_MAX_FIELDS, sizeof(void*));
-  for (int c = 0; c < g_compCount; c++) {
-    for (int f = 0; f < g_fieldCounts[c]; f++) {
-      g_fields[c * KX_MAX_FIELDS + f] = calloc(8, g_cap);
-      g_frozenFields[c * KX_MAX_FIELDS + f] = calloc(8, g_cap);
-    }
-  }
-  g_tagMasks = (long long*)calloc(g_cap, sizeof(long long));
-  g_compMasks = (long long*)calloc(g_cap, sizeof(long long));
-  g_gens = (int*)calloc(g_cap, sizeof(int));
-  g_frozenIds = (long long*)calloc(g_cap, sizeof(long long));
-  g_frozenTagMasks = (long long*)calloc(g_cap, sizeof(long long));
-  g_frozenCompMasks = (long long*)calloc(g_cap, sizeof(long long));
 }
 
 void kx_set_systems(int count, const void* table) {
@@ -111,96 +285,190 @@ void kx_set_systems(int count, const void* table) {
   }
 }
 
-kx_entity kx_spawn(long long tagMask) {
-  long long slot = -1;
-  for (int i = 0; i < g_size; i++) {
-    if (!slotAlive(i)) { slot = i; break; }
+static int defaultBoxCount(void) {
+  const char* env = getenv("KUBEXIC_CORES");
+  if (env) {
+    double v = atof(env);
+    if (v > 0) {
+      int n = v < 1 ? (int)(v * sysconf(_SC_NPROCESSORS_ONLN)) : (int)v;
+      return n < 1 ? 1 : (n > KX_MAX_BOXES ? KX_MAX_BOXES : n);
+    }
   }
-  if (slot < 0) {
-    slot = g_size++;
-    if (g_size > g_cap) growStore();
-  }
-  g_gens[slot] = (g_gens[slot] + 1) & 0xFFFF;
-  if (g_gens[slot] == 0) g_gens[slot] = 1;
-  g_tagMasks[slot] = tagMask;
-  g_compMasks[slot] = 0;
-  return slotEntity(slot);
+  int ncpu = (int)sysconf(_SC_NPROCESSORS_ONLN);
+  return ncpu > 1 ? ncpu : 1;
 }
 
-void kx_despawn(kx_entity e) {
-  long long slot = entitySlot(e);
-  if (!entityAlive(e)) return;
-  g_gens[slot] = (g_gens[slot] + 1) & 0xFFFF;
-  if (g_gens[slot] == 0) g_gens[slot] = 1;
-  g_tagMasks[slot] = 0;
-  g_compMasks[slot] = 0;
+kx_entity kx_spawn(long long tagMask) {
+  if (!g_boxes) createBoxes(defaultBoxCount());
+  int target;
+  pthread_mutex_lock(&g_spawnLock);
+  target = (int)(g_spawnCounter++ % g_boxCount);
+  pthread_mutex_unlock(&g_spawnLock);
+  kx_box* b = &g_boxes[target];
+  pthread_mutex_lock(&b->allocLock);
+  long long slot = -1;
+  for (int i = 0; i < b->size; i++) {
+    if (!slotAlive(b, i)) { slot = i; break; }
+  }
+  if (slot < 0) {
+    slot = b->size++;
+    if (b->size > b->cap) growBox(b);
+  }
+  b->gens[slot] = (b->gens[slot] + 1) & 0xFFFF;
+  if (b->gens[slot] == 0) b->gens[slot] = 1;
+  b->tagMasks[slot] = tagMask;
+  b->compMasks[slot] = 0;
+  pthread_mutex_unlock(&b->allocLock);
+  return ((kx_entity)target << 48) | (slot << 16) | b->gens[slot];
 }
 
 void kx_ensure_comp(kx_entity e, int comp) {
   if (!entityAlive(e) || comp < 0 || comp >= g_compCount) return;
-  g_compMasks[entitySlot(e)] |= (1LL << comp);
+  kx_req r = {REQ_ENSURE, comp, 0, e};
+  enqueue(&g_boxes[entityBox(e)], g_currentBuffer < 0 ? g_boxCount : g_currentBuffer, r);
 }
 
 void kx_detach_comp(kx_entity e, int comp) {
   if (!entityAlive(e) || comp < 0 || comp >= g_compCount) return;
-  g_compMasks[entitySlot(e)] &= ~(1LL << comp);
+  kx_req r = {REQ_DETACH, comp, 0, e};
+  enqueue(&g_boxes[entityBox(e)], g_currentBuffer < 0 ? g_boxCount : g_currentBuffer, r);
 }
 
+void kx_despawn(kx_entity e) {
+  if (!entityAlive(e)) return;
+  kx_req r = {REQ_DESPAWN, 0, 0, e};
+  enqueue(&g_boxes[entityBox(e)], g_currentBuffer < 0 ? g_boxCount : g_currentBuffer, r);
+}
+
+/* ---- live self-access (box-local, no locks) ---- */
+
 long long kx_comp_read_i64(kx_entity e, int comp, int field) {
-  if (!entityAlive(e) || comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp])
-    return 0;
-  return ((long long*)g_fields[comp * KX_MAX_FIELDS + field])[entitySlot(e)];
+  int box = entityBox(e);
+  if (box < 0 || box >= g_boxCount) return 0;
+  kx_box* b = &g_boxes[box];
+  long long slot = entitySlot(e);
+  if (!slotAlive(b, slot) || entityGen(e) != b->gens[slot]) return 0;
+  if (comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp]) return 0;
+  return ((long long*)b->fFields[comp * KX_MAX_FIELDS + field])[slot];
 }
 
 void kx_comp_write_i64(kx_entity e, int comp, int field, long long v) {
-  if (!entityAlive(e) || comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp])
-    return;
-  ((long long*)g_fields[comp * KX_MAX_FIELDS + field])[entitySlot(e)] = v;
+  int box = entityBox(e);
+  if (box < 0 || box >= g_boxCount) return;
+  kx_box* b = &g_boxes[box];
+  long long slot = entitySlot(e);
+  if (!slotAlive(b, slot) || entityGen(e) != b->gens[slot]) return;
+  if (comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp]) return;
+  ((long long*)b->fFields[comp * KX_MAX_FIELDS + field])[slot] = v;
 }
 
 double kx_comp_read_f64(kx_entity e, int comp, int field) {
-  if (!entityAlive(e) || comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp])
-    return 0.0;
-  return ((double*)g_fields[comp * KX_MAX_FIELDS + field])[entitySlot(e)];
+  int box = entityBox(e);
+  if (box < 0 || box >= g_boxCount) return 0.0;
+  kx_box* b = &g_boxes[box];
+  long long slot = entitySlot(e);
+  if (!slotAlive(b, slot) || entityGen(e) != b->gens[slot]) return 0.0;
+  if (comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp]) return 0.0;
+  return ((double*)b->fFields[comp * KX_MAX_FIELDS + field])[slot];
 }
 
 void kx_comp_write_f64(kx_entity e, int comp, int field, double v) {
-  if (!entityAlive(e) || comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp])
-    return;
-  ((double*)g_fields[comp * KX_MAX_FIELDS + field])[entitySlot(e)] = v;
+  int box = entityBox(e);
+  if (box < 0 || box >= g_boxCount) return;
+  kx_box* b = &g_boxes[box];
+  long long slot = entitySlot(e);
+  if (!slotAlive(b, slot) || entityGen(e) != b->gens[slot]) return;
+  if (comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp]) return;
+  ((double*)b->fFields[comp * KX_MAX_FIELDS + field])[slot] = v;
 }
 
 char* kx_comp_read_str(kx_entity e, int comp, int field) {
-  if (!entityAlive(e) || comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp])
-    return NULL;
-  return ((char**)g_fields[comp * KX_MAX_FIELDS + field])[entitySlot(e)];
+  int box = entityBox(e);
+  if (box < 0 || box >= g_boxCount) return NULL;
+  kx_box* b = &g_boxes[box];
+  long long slot = entitySlot(e);
+  if (!slotAlive(b, slot) || entityGen(e) != b->gens[slot]) return NULL;
+  if (comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp]) return NULL;
+  return ((char**)b->fFields[comp * KX_MAX_FIELDS + field])[slot];
 }
 
 void kx_comp_write_str(kx_entity e, int comp, int field, char* v) {
-  if (!entityAlive(e) || comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp])
-    return;
-  ((char**)g_fields[comp * KX_MAX_FIELDS + field])[entitySlot(e)] = v;
+  int box = entityBox(e);
+  if (box < 0 || box >= g_boxCount) return;
+  kx_box* b = &g_boxes[box];
+  long long slot = entitySlot(e);
+  if (!slotAlive(b, slot) || entityGen(e) != b->gens[slot]) return;
+  if (comp < 0 || comp >= g_compCount || field >= g_fieldCounts[comp]) return;
+  ((char**)b->fFields[comp * KX_MAX_FIELDS + field])[slot] = v;
 }
 
-void kx_freeze(void) {
+/* ---- freeze (per-box) + merge (deterministic global order) ---- */
+
+static void freezeBox(kx_box* b) {
   long long fs = 0;
-  for (int slot = 0; slot < g_size; slot++) {
-    if (!slotAlive(slot)) continue;
-    g_frozenIds[fs] = slotEntity(slot);
-    g_frozenTagMasks[fs] = g_tagMasks[slot];
-    long long cm = g_compMasks[slot];
-    g_frozenCompMasks[fs] = cm;
+  for (int slot = 0; slot < b->size; slot++) {
+    if (!slotAlive(b, slot)) continue;
+    b->fIds[fs] = ((kx_entity)((b - g_boxes)) << 48) | (slot << 16) | b->gens[slot];
+    b->fTags[fs] = b->tagMasks[slot];
+    long long cm = b->compMasks[slot];
+    b->fComps[fs] = cm;
     for (int c = 0; c < g_compCount; c++) {
       if (!(cm & (1LL << c))) continue;
       for (int f = 0; f < g_fieldCounts[c]; f++) {
-        memcpy((char*)g_frozenFields[c * KX_MAX_FIELDS + f] + fs * 8,
-               (char*)g_fields[c * KX_MAX_FIELDS + f] + slot * 8, 8);
+        memcpy((char*)b->fFields[c * KX_MAX_FIELDS + f] + fs * 8,
+               (char*)b->fFields[c * KX_MAX_FIELDS + f] + slot * 8, 8);
       }
     }
     fs++;
   }
+  b->fSize = fs;
+}
+
+static void mergeFrozen(void) {
+  long long total = 0;
+  for (int i = 0; i < g_boxCount; i++) total += g_boxes[i].fSize;
+  if (total > 0) {
+    int cap = g_boxCount * KX_INIT_ENTITIES;
+    while (cap < total) cap *= 2;
+    g_frozenIds = (long long*)realloc(g_frozenIds, sizeof(long long) * cap);
+    g_frozenTagMasks = (long long*)realloc(g_frozenTagMasks, sizeof(long long) * cap);
+    g_frozenCompMasks = (long long*)realloc(g_frozenCompMasks, sizeof(long long) * cap);
+  }
+  long long fs = 0;
+  for (int i = 0; i < g_boxCount; i++) {
+    kx_box* b = &g_boxes[i];
+    for (long long j = 0; j < b->fSize; j++) {
+      g_frozenIds[fs] = b->fIds[j];
+      g_frozenTagMasks[fs] = b->fTags[j];
+      long long cm = b->fComps[j];
+      g_frozenCompMasks[fs] = cm;
+      for (int c = 0; c < g_compCount; c++) {
+        if (!(cm & (1LL << c))) continue;
+        for (int f = 0; f < g_fieldCounts[c]; f++) {
+          memcpy((char*)g_frozenFields[c * KX_MAX_FIELDS + f] + fs * 8,
+                 (char*)b->fFields[c * KX_MAX_FIELDS + f] + j * 8, 8);
+        }
+      }
+      fs++;
+    }
+  }
   g_frozenSize = fs;
 }
+
+static void growGlobalFrozen(void) {
+  if (!g_frozenFields) {
+    g_frozenFields = (void**)calloc(g_compCount * KX_MAX_FIELDS, sizeof(void*));
+  }
+  int cap = g_boxCount * KX_INIT_ENTITIES;
+  for (int c = 0; c < g_compCount; c++) {
+    for (int f = 0; f < g_fieldCounts[c]; f++) {
+      g_frozenFields[c * KX_MAX_FIELDS + f] =
+          realloc(g_frozenFields[c * KX_MAX_FIELDS + f], 8 * cap);
+    }
+  }
+}
+
+/* ---- frozen view (global, read-only during simulate) ---- */
 
 static int frozenMatch(long long fs, long long subtreeMask, int exact) {
   if (subtreeMask == 0) return 0;
@@ -259,31 +527,34 @@ double kx_get_dt(void) { return g_dt; }
 
 long long kx_get_tick(void) { return g_tick; }
 
-void kx_run(int tps, long long maxTicks) {
-  g_tps = tps > 0 ? tps : 0;
-  g_maxTicks = maxTicks;
-  g_stop = 0;
-  g_tick = 0;
-  g_dt = g_tps > 0 ? 1.0 / (double)g_tps : 1.0 / 60.0;
+/* ---- parallel tick loop ---- */
 
-  kx_freeze();
+typedef struct {
+  int boxIndex;
+  pthread_barrier_t* startBarrier;
+  pthread_barrier_t* simBarrier;
+  pthread_barrier_t* commitBarrier;
+  pthread_barrier_t* freezeBarrier;
+} kx_worker_arg;
 
-  struct timespec next;
-  clock_gettime(CLOCK_MONOTONIC, &next);
-
+static void* kx_worker(void* argp) {
+  kx_worker_arg* a = (kx_worker_arg*)argp;
+  int bi = a->boxIndex;
+  g_currentBuffer = bi;
+  kx_box* b = &g_boxes[bi];
   for (;;) {
+    pthread_barrier_wait(a->startBarrier);
     if (g_stop) break;
-    if (g_maxTicks >= 0 && g_tick >= g_maxTicks) break;
 
-    for (int s = 0; s < g_sysCount; s++) {
-      if (g_sysMatch[s] == 0 && g_sysWithout[s] == 0) {
-        g_sysBodies[s](0);
+    if (bi == 0) {
+      for (int s = 0; s < g_sysCount; s++) {
+        if (g_sysMatch[s] == 0 && g_sysWithout[s] == 0) g_sysBodies[s](0);
       }
     }
 
-    for (long long fs = 0; fs < g_frozenSize; fs++) {
-      long long cm = g_frozenCompMasks[fs];
-      kx_entity e = g_frozenIds[fs];
+    for (long long fs = 0; fs < b->fSize; fs++) {
+      long long cm = b->fComps[fs];
+      kx_entity e = b->fIds[fs];
       for (int s = 0; s < g_sysCount; s++) {
         if (g_sysMatch[s] == 0 && g_sysWithout[s] == 0) continue;
         if ((cm & g_sysMatch[s]) == g_sysMatch[s] && (cm & g_sysWithout[s]) == 0) {
@@ -292,31 +563,152 @@ void kx_run(int tps, long long maxTicks) {
       }
     }
 
-    kx_freeze();
-    g_tick++;
+    pthread_barrier_wait(a->simBarrier);
+    commitBox(b);
+    pthread_barrier_wait(a->commitBarrier);
+    freezeBox(b);
+    pthread_barrier_wait(a->freezeBarrier);
+  }
+  return NULL;
+}
 
-    if (g_tps > 0) {
-      next.tv_nsec += 1000000000L / g_tps;
-      if (next.tv_nsec >= 1000000000L) {
-        next.tv_sec += next.tv_nsec / 1000000000L;
-        next.tv_nsec %= 1000000000L;
-      }
-      struct timespec now;
-      clock_gettime(CLOCK_MONOTONIC, &now);
-      if (now.tv_sec < next.tv_sec ||
-          (now.tv_sec == next.tv_sec && now.tv_nsec < next.tv_nsec)) {
-        struct timespec sleep = {next.tv_sec - now.tv_sec, next.tv_nsec - now.tv_nsec};
-        if (sleep.tv_nsec < 0) {
-          sleep.tv_sec -= 1;
-          sleep.tv_nsec += 1000000000L;
+void kx_run(int tps, long long maxTicks, double cores) {
+  g_tps = tps > 0 ? tps : 0;
+  g_maxTicks = maxTicks;
+  g_stop = 0;
+  g_tick = 0;
+  g_dt = g_tps > 0 ? 1.0 / (double)g_tps : 1.0 / 60.0;
+
+  int boxCount;
+  if (g_boxes) {
+    boxCount = g_boxCount;
+  } else if (cores < 0) {
+    boxCount = defaultBoxCount();
+  } else if (cores == 0) {
+    boxCount = 1;
+  } else if (cores < 1) {
+    int n = (int)(cores * sysconf(_SC_NPROCESSORS_ONLN));
+    boxCount = n < 1 ? 1 : n;
+  } else {
+    boxCount = (int)cores;
+  }
+  if (boxCount < 1) boxCount = 1;
+  if (boxCount > KX_MAX_BOXES) boxCount = KX_MAX_BOXES;
+
+  createBoxes(boxCount);
+  growGlobalFrozen();
+
+  bufFlush(g_boxCount);
+  for (int i = 0; i < g_boxCount; i++) commitBox(&g_boxes[i]);
+  for (int i = 0; i < g_boxCount; i++) freezeBox(&g_boxes[i]);
+  mergeFrozen();
+
+  if (g_boxCount > 1) {
+    pthread_barrier_t startBarrier, simBarrier, commitBarrier, freezeBarrier;
+    int participants = g_boxCount + 1;
+    pthread_barrier_init(&startBarrier, NULL, participants);
+    pthread_barrier_init(&simBarrier, NULL, participants);
+    pthread_barrier_init(&commitBarrier, NULL, participants);
+    pthread_barrier_init(&freezeBarrier, NULL, participants);
+    pthread_t threads[KX_MAX_BOXES];
+    kx_worker_arg args[KX_MAX_BOXES];
+    for (int i = 0; i < g_boxCount; i++) {
+      args[i] = (kx_worker_arg){i, &startBarrier, &simBarrier, &commitBarrier, &freezeBarrier};
+      pthread_create(&threads[i], NULL, kx_worker, &args[i]);
+    }
+
+    struct timespec next;
+    clock_gettime(CLOCK_MONOTONIC, &next);
+
+    for (;;) {
+      if (g_stop) break;
+      if (g_maxTicks >= 0 && g_tick >= g_maxTicks) break;
+      pthread_barrier_wait(&startBarrier);
+      pthread_barrier_wait(&simBarrier);
+      pthread_barrier_wait(&commitBarrier);
+      pthread_barrier_wait(&freezeBarrier);
+      mergeFrozen();
+      for (int i = 0; i < g_boxCount; i++) bufFlush(i);
+      g_tick++;
+      if (g_tps > 0) {
+        next.tv_nsec += 1000000000L / g_tps;
+        if (next.tv_nsec >= 1000000000L) {
+          next.tv_sec += next.tv_nsec / 1000000000L;
+          next.tv_nsec %= 1000000000L;
         }
-        nanosleep(&sleep, NULL);
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec < next.tv_sec ||
+            (now.tv_sec == next.tv_sec && now.tv_nsec < next.tv_nsec)) {
+          struct timespec sleep = {next.tv_sec - now.tv_sec, next.tv_nsec - now.tv_nsec};
+          if (sleep.tv_nsec < 0) {
+            sleep.tv_sec -= 1;
+            sleep.tv_nsec += 1000000000L;
+          }
+          nanosleep(&sleep, NULL);
+        }
+      }
+    }
+
+    g_stop = 1;
+    pthread_barrier_wait(&startBarrier);
+    for (int i = 0; i < g_boxCount; i++) pthread_join(threads[i], NULL);
+    pthread_barrier_destroy(&startBarrier);
+    pthread_barrier_destroy(&simBarrier);
+    pthread_barrier_destroy(&commitBarrier);
+    pthread_barrier_destroy(&freezeBarrier);
+  } else {
+    g_currentBuffer = 0;
+    kx_box* b = &g_boxes[0];
+    struct timespec next;
+    clock_gettime(CLOCK_MONOTONIC, &next);
+    for (;;) {
+      if (g_stop) break;
+      if (g_maxTicks >= 0 && g_tick >= g_maxTicks) break;
+      for (int s = 0; s < g_sysCount; s++) {
+        if (g_sysMatch[s] == 0 && g_sysWithout[s] == 0) g_sysBodies[s](0);
+      }
+      for (long long fs = 0; fs < b->fSize; fs++) {
+        long long cm = b->fComps[fs];
+        kx_entity e = b->fIds[fs];
+        for (int s = 0; s < g_sysCount; s++) {
+          if (g_sysMatch[s] == 0 && g_sysWithout[s] == 0) continue;
+          if ((cm & g_sysMatch[s]) == g_sysMatch[s] && (cm & g_sysWithout[s]) == 0) {
+            g_sysBodies[s](e);
+          }
+        }
+      }
+      commitBox(b);
+      freezeBox(b);
+      mergeFrozen();
+      bufFlush(0);
+      g_tick++;
+      if (g_tps > 0) {
+        next.tv_nsec += 1000000000L / g_tps;
+        if (next.tv_nsec >= 1000000000L) {
+          next.tv_sec += next.tv_nsec / 1000000000L;
+          next.tv_nsec %= 1000000000L;
+        }
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec < next.tv_sec ||
+            (now.tv_sec == next.tv_sec && now.tv_nsec < next.tv_nsec)) {
+          struct timespec sleep = {next.tv_sec - now.tv_sec, next.tv_nsec - now.tv_nsec};
+          if (sleep.tv_nsec < 0) {
+            sleep.tv_sec -= 1;
+            sleep.tv_nsec += 1000000000L;
+          }
+          nanosleep(&sleep, NULL);
+        }
       }
     }
   }
+  g_currentBuffer = g_boxCount;
+  for (int i = 0; i < g_boxCount; i++) commitBox(&g_boxes[i]);
+  bufFlush(g_boxCount);
 }
 
-/* ---- console, string helpers, process control (unchanged) ---- */
+/* ---- console, string helpers, process control ---- */
 
 static char* kx_dup(const char* s) {
   size_t n = strlen(s);
@@ -325,9 +717,20 @@ static char* kx_dup(const char* s) {
   return p;
 }
 
-void kx_print(const char* s) { if (s) fputs(s, stdout); }
+void kx_print(const char* s) {
+  if (!s) return;
+  int idx = g_currentBuffer >= 0 ? g_currentBuffer : g_boxCount;
+  bufAppend(idx, s);
+  if (idx == g_boxCount) bufFlush(idx);
+}
 
-void kx_println(const char* s) { if (s) puts(s); }
+void kx_println(const char* s) {
+  if (!s) return;
+  int idx = g_currentBuffer >= 0 ? g_currentBuffer : g_boxCount;
+  bufAppend(idx, s);
+  bufAppend(idx, "\n");
+  if (idx == g_boxCount) bufFlush(idx);
+}
 
 char* kx_str_cat(const char* a, const char* b) {
   if (!a) a = "";
@@ -374,9 +777,14 @@ char* kx_readln(void) {
   return line;
 }
 
-void kx_exit(int code) { exit(code); }
+void kx_exit(int code) {
+  bufFlush(g_currentBuffer >= 0 ? g_currentBuffer : g_boxCount);
+  fflush(stdout);
+  exit(code);
+}
 
 void kx_panic(const char* msg) {
+  fflush(stdout);
   fprintf(stderr, "panic: %s\n", msg ? msg : "");
   exit(1);
 }

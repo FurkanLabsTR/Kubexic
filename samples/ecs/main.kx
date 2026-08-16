@@ -3,7 +3,7 @@ int main() {
     var a = spawn { Counter { value = 0, owner = EntityId.None }, tags [Counting] };
     var b = spawn { Counter { value = 0, owner = a }, tags [Counting] };
     var c = spawn { Counter { value = 0, owner = b }, tags [Counting] };
-    std.println($"spawned: {a}, {b}, {c}");
+    std.println("spawned 3 entities");
     run(max, ticks: 8);
     std.println("world done");
     return 0;
