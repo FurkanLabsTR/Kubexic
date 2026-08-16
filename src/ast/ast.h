@@ -167,7 +167,9 @@ struct Decl {
   std::vector<Attribute> attributes;
   StmtPtr body;
   std::vector<std::string> params;
+  std::vector<std::string> paramTypes;
   std::string retKind;
+  bool isExtern = false;
   std::string parentTag;
   std::vector<std::string> enumMembers;
   ExprPtr constValue;

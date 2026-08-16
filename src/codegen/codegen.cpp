@@ -403,6 +403,19 @@ void Codegen::emitInitCalls() {
   builder_.CreateCall(initFn, {llvm::ConstantInt::get(i32, (uint64_t)compNames_.size()),
                                builder_.CreateConstGEP2_32(countsArrTy, countsGv, 0, 0),
                                builder_.CreateConstGEP2_32(typesArrTy, typesGv, 0, 0)});
+  if (!compNames_.empty()) {
+    std::vector<llvm::Constant*> names;
+    for (const auto& n : compNames_) {
+      names.push_back(builder_.CreateGlobalStringPtr(n));
+    }
+    auto namesArrTy = llvm::ArrayType::get(ptr, names.size());
+    auto namesGv = new llvm::GlobalVariable(
+        *module_, namesArrTy, true, llvm::GlobalValue::InternalLinkage,
+        llvm::ConstantArray::get(namesArrTy, names), "kx_comp_names");
+    auto namesFn = runtimeFn("kx_set_comp_names", llvm::Type::getVoidTy(ctx_), {i32, ptr});
+    builder_.CreateCall(namesFn, {llvm::ConstantInt::get(i32, (uint64_t)names.size()),
+                                  builder_.CreateConstGEP2_32(namesArrTy, namesGv, 0, 0)});
+  }
 
   if (!systemOrder_.empty()) {
     auto sysTy = llvm::StructType::get(ctx_, {i64, i64, ptr});
@@ -428,6 +441,45 @@ void Codegen::emitInitCalls() {
                         {llvm::ConstantInt::get(i32, (uint64_t)entries.size()),
                          builder_.CreateConstGEP2_32(sysArrTy, sysGv, 0, 0)});
   }
+}
+
+llvm::Type* Codegen::llvmTypeFromName(const std::string& name) {
+  if (name == "void") return llvm::Type::getVoidTy(ctx_);
+  if (name == "bool") return llvm::Type::getInt1Ty(ctx_);
+  if (name == "int") return llvm::Type::getInt32Ty(ctx_);
+  if (name == "long") return llvm::Type::getInt64Ty(ctx_);
+  if (name == "float") return llvm::Type::getFloatTy(ctx_);
+  if (name == "double") return llvm::Type::getDoubleTy(ctx_);
+  if (name == "byte") return llvm::Type::getInt8Ty(ctx_);
+  if (name == "string") return llvm::PointerType::get(ctx_, 0);
+  if (name == "EntityId") return llvm::Type::getInt64Ty(ctx_);
+  auto st = checker_.structs().find(name);
+  if (st != checker_.structs().end()) return structType(name);
+  return llvm::Type::getInt64Ty(ctx_);
+}
+
+llvm::Function* Codegen::ensureExtern(const Decl& d) {
+  std::string key = "extern_" + d.name;
+  auto it = runtimeCache_.find(key);
+  if (it != runtimeCache_.end()) return it->second;
+  std::vector<llvm::Type*> params;
+  for (const auto& pt : d.paramTypes) params.push_back(llvmTypeFromName(pt));
+  auto ft = llvm::FunctionType::get(llvmTypeFromName(d.retKind), params, false);
+  auto fn = llvm::Function::Create(ft, llvm::GlobalValue::ExternalLinkage, d.name, *module_);
+  runtimeCache_[key] = fn;
+  return fn;
+}
+
+std::vector<std::string> Codegen::linkLibraries() const {
+  std::vector<std::string> libs;
+  for (const Decl* d : checker_.externDecls()) {
+    for (const auto& a : d->attributes) {
+      if (a.name == "Link" && !a.args.empty() && a.args[0]->kind == Expr::Kind::StringLit) {
+        libs.push_back(a.args[0]->str);
+      }
+    }
+  }
+  return libs;
 }
 
 llvm::Function* Codegen::ensureFunction(const Decl& d,
@@ -1153,6 +1205,18 @@ llvm::Value* Codegen::genCall(const Expr& call) {
       }
       std::vector<llvm::Value*> argv;
       for (const auto& a : call.args) argv.push_back(genExpr(*a.value));
+      if (fn->isExtern) {
+        auto ext = ensureExtern(*fn);
+        size_t i = 0;
+        for (auto& arg : ext->args()) {
+          if (i < argv.size()) {
+            auto pt = llvmTypeFromName(fn->paramTypes[i]);
+            argv[i] = coerce(argv[i], pt);
+          }
+          i++;
+        }
+        return builder_.CreateCall(ext, argv);
+      }
       auto calleeFn = ensureFunction(*fn, ptypes);
       auto retIt = specRetTypes_.find(mangle(name, ptypes));
       if (retIt != specRetTypes_.end()) {
@@ -1968,8 +2032,9 @@ bool Codegen::emitObject(const std::string& objectPath) {
 bool Codegen::emitExecutable(const std::string& objectPath, const std::string& runtimeObject,
                              const std::string& outputPath) {
   if (!emitObject(objectPath)) return false;
-  std::string cmd = "gcc " + objectPath + " " + runtimeObject + " -lpthread -lm -o " +
-                    outputPath;
+  std::string cmd = "gcc " + objectPath + " " + runtimeObject + " -lpthread -lm";
+  for (const auto& lib : linkLibraries()) cmd += " -l" + lib;
+  cmd += " -o " + outputPath;
   int rc = std::system(cmd.c_str());
   if (rc != 0) {
     errors_.push_back("codegen: linking failed");

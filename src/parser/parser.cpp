@@ -501,6 +501,33 @@ Decl Parser::parseTopLevel() {
     case TokenKind::KwVar:
     case TokenKind::KwInt:
       return parseFunction();
+    case TokenKind::KwExtern: {
+      advance();
+      return parseExtern({});
+    }
+    case TokenKind::LBracket: {
+      std::vector<Attribute> attrs;
+      while (check(TokenKind::LBracket)) {
+        advance();
+        Attribute attr;
+        if (checkName()) attr.name = advance().text;
+        if (match(TokenKind::LParen)) {
+          while (!check(TokenKind::RParen) && !check(TokenKind::Eof)) {
+            attr.args.push_back(parseExpression());
+            if (!match(TokenKind::Comma)) break;
+          }
+          expect(TokenKind::RParen, "')' after attribute args");
+        }
+        expect(TokenKind::RBracket, "']' to close attribute");
+        attrs.push_back(std::move(attr));
+      }
+      if (check(TokenKind::KwExtern)) {
+        advance();
+        return parseExtern(std::move(attrs));
+      }
+      errorHere("attributes before a declaration require 'extern'");
+      return Decl{};
+    }
     default:
       errorHere("expected a top-level declaration");
       advance();
@@ -647,6 +674,37 @@ Decl Parser::parseConst() {
   if (!expect(TokenKind::Assign, "'=' in const")) return d;
   d.constValue = parseExpression();
   expect(TokenKind::Semi, "';' after const");
+  return d;
+}
+
+Decl Parser::parseExtern(std::vector<Attribute> attributes) {
+  Decl d;
+  d.kind = Decl::Kind::Function;
+  d.isExtern = true;
+  d.attributes = std::move(attributes);
+  const Token& start = peek();
+  d.loc = SourceLoc{start.line, start.col};
+  if (!checkName()) {
+    errorHere("expected a return type in extern declaration");
+    return d;
+  }
+  d.retKind = advance().text;
+  if (!expect(TokenKind::Identifier, "function name")) return d;
+  d.name = tokens_[cur_ - 1].text;
+  if (!expect(TokenKind::LParen, "'(' after function name")) return d;
+  while (!check(TokenKind::RParen) && !check(TokenKind::Eof)) {
+    if (!checkName()) {
+      errorHere("expected a parameter type");
+      break;
+    }
+    std::string pt = advance().text;
+    if (!expect(TokenKind::Identifier, "parameter name")) break;
+    d.paramTypes.push_back(pt);
+    d.params.push_back(tokens_[cur_ - 1].text);
+    if (!match(TokenKind::Comma)) break;
+  }
+  expect(TokenKind::RParen, "')' after parameters");
+  expect(TokenKind::Semi, "';' after extern declaration");
   return d;
 }
 

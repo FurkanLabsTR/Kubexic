@@ -340,6 +340,12 @@ typedef struct {
 static int g_compCount;
 static int g_fieldCounts[KX_MAX_COMPONENTS];
 static int g_fieldTypes[KX_MAX_COMPONENTS * KX_MAX_FIELDS];
+static char** g_compNames;
+
+void kx_set_comp_names(int count, char** names) {
+  g_compNames = (char**)malloc(sizeof(char*) * count);
+  for (int i = 0; i < count; i++) g_compNames[i] = names[i];
+}
 static int g_boxCount = 1;
 static kx_box* g_boxes;
 
@@ -577,6 +583,22 @@ static void applyRequest(kx_entity e, const kx_req* r) {
   kx_box* b;
   long long slot;
   if (!resolve(e, &b, &slot)) return;
+  if (getenv("KX_TRACE") && (r->kind == REQ_ENSURE || r->kind == REQ_DETACH ||
+                             r->kind == REQ_DESPAWN)) {
+    char line[256];
+    const char* kind = r->kind == REQ_ENSURE ? "attach" :
+                       r->kind == REQ_DETACH ? "detach" : "despawn";
+    if (r->kind == REQ_DESPAWN) {
+      snprintf(line, sizeof(line), "[trace tick %lld] %s entity=%lld\n",
+               (long long)g_tick, kind, (long long)e);
+    } else {
+      const char* cn = g_compNames && r->comp < g_compCount ? g_compNames[r->comp] : "?";
+      snprintf(line, sizeof(line), "[trace tick %lld] %s entity=%lld comp=%s\n",
+               (long long)g_tick, kind, (long long)e, cn ? cn : "?");
+    }
+    ssize_t wr = write(2, line, strlen(line));
+    (void)wr;
+  }
   switch (r->kind) {
     case REQ_ENSURE:
       b->compMasks[slot] |= (1LL << r->comp);

@@ -50,6 +50,9 @@ class Codegen {
 
   llvm::Function* ensureFunction(const Decl& d,
                                 const std::vector<std::shared_ptr<Type>>& paramTypes);
+  llvm::Type* llvmTypeFromName(const std::string& name);
+  llvm::Function* ensureExtern(const Decl& d);
+  std::vector<std::string> linkLibraries() const;
   void emitSystemFunction(const Decl& d);
   void emitInitCalls();
   void declareEcsRuntime();

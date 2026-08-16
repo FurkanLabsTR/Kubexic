@@ -207,6 +207,16 @@ void Checker::checkAttributes(const Decl& d) {
   }
 }
 
+std::vector<const Decl*> Checker::externDecls() const {
+  std::vector<const Decl*> out;
+  for (const auto& [name, vec] : functions_) {
+    for (const Decl* d : vec) {
+      if (d->isExtern) out.push_back(d);
+    }
+  }
+  return out;
+}
+
 const Decl* Checker::functionByName(const std::string& name, size_t arity) const {
   auto it = functions_.find(name);
   if (it == functions_.end()) return nullptr;
@@ -699,6 +709,19 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
         return call.type;
       }
       for (auto& a : call.args) infer(*a.value);
+      if (fn.isExtern) {
+        for (size_t i = 0; i < call.args.size() && i < fn.paramTypes.size(); i++) {
+          auto pt = typeFromTypeName(fn.paramTypes[i], call.loc);
+          if (pt->isError()) continue;
+          auto at = call.args[i].value->type;
+          if (at && !at->isUnknownish() && !assignable(pt, at)) {
+            error(call.loc, "extern argument " + std::to_string(i + 1) + " expects " +
+                                pt->describe() + ", got " + at->describe());
+          }
+        }
+        call.type = typeFromTypeName(fn.retKind, call.loc);
+        return call.type;
+      }
       if (fn.retKind == "void") call.type = Type::make(TypeKind::Void);
       else if (fn.retKind == "int") call.type = Type::make(TypeKind::Int);
       else call.type = Type::make(TypeKind::Generic);
@@ -1230,6 +1253,7 @@ void Checker::checkSystem(Decl& d) {
 }
 
 void Checker::checkFunction(Decl& d) {
+  if (d.isExtern) return;
   if (d.name == "main") {
     if (d.retKind != "int" && d.retKind != "var") {
       error(d.loc, "main must be declared 'int main()'");

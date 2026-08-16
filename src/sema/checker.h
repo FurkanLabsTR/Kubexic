@@ -22,6 +22,7 @@ class Checker {
   const std::map<std::string, const Decl*>& structs() const { return structs_; }
   const std::map<std::string, const Decl*>& enums() const { return enums_; }
   const Decl* functionByName(const std::string& name, size_t arity = 0) const;
+  std::vector<const Decl*> externDecls() const;
   bool constValue(const std::string& name, ConstValue* out) const;
   std::shared_ptr<Type> reInferBody(const std::vector<StmtPtr>& body,
                                     const std::map<std::string, std::shared_ptr<Type>>& params);

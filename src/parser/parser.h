@@ -42,6 +42,7 @@ class Parser {
   Decl parseEnum();
   Decl parseConst();
   Decl parseFunction();
+  Decl parseExtern(std::vector<Attribute> attributes);
   Decl parseTopLevel();
 
   StmtPtr parseStatement();
