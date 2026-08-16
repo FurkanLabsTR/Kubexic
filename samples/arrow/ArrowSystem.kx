@@ -1,7 +1,9 @@
-// ArrowSystem.kx
+// ArrowSystem.kx — fly, then hit targets via the kx.spatial library
 system ArrowSystem {
+    Pos3.z += 1.0;
     foreach (var hit in spatial.Overlap(Pos3, 0.5)) {
         attach(hit.Id, new Damage { amount = 10, sender = Arrow.sender });
+        std.println($"tick {tick}: arrow hit");
         despawn self;
     }
 }

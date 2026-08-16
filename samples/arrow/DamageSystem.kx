@@ -1,8 +1,9 @@
-// DamageSystem.kx
+// DamageSystem.kx — processes incoming damage, heals the sender on kill
 system DamageSystem {
     Health.hp -= Damage.amount;
     if (Health.hp <= 0) {
         attach(Damage.sender, new Healing { amount = 5 });
+        std.println($"tick {tick}: target destroyed");
         despawn self;
     } else {
         detach(self, Damage);

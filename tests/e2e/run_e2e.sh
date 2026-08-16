@@ -86,5 +86,24 @@ fi
 PASS=$((PASS + 1))
 echo "e2e migration invariance (migrate-all == normal): PASS"
 
-echo "e2e: $PASS/5 checks passed"
+./build/kxc build samples/arrow build/e2e_arrow
+AR1=$(KUBEXIC_CORES=1 timeout 15 ./build/e2e_arrow)
+AR8=$(KUBEXIC_CORES=8 timeout 15 ./build/e2e_arrow)
+EXPECTED="tick 29: arrow hit
+tick 30: target destroyed
+arrow demo done"
+if [ "$AR1" != "$EXPECTED" ]; then
+  echo "e2e arrow: FAIL"
+  echo "--- expected ---"; echo "$EXPECTED"
+  echo "--- got ---"; echo "$AR1"
+  exit 1
+fi
+if [ "$AR8" != "$AR1" ]; then
+  echo "e2e arrow: FAIL (multi-box differs)"
+  exit 1
+fi
+PASS=$((PASS + 1))
+echo "e2e arrow (spatial library, 1 box == 8 boxes): PASS"
+
+echo "e2e: $PASS/6 checks passed"
 exit 0

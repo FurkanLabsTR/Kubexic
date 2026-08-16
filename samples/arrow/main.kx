@@ -1,9 +1,16 @@
-// main.kx
+// main.kx — one target at z=30, one arrow launched toward it
 int main() {
-    std.println("Starting simulation...");
-    for (var i = 0; i < 100; i++) {
-        spawn { Pos3 { x = i, y = 10, z = 0 }, Health { hp = 100 }, tags [Combatant] };
-    }
-    run(60);
+    var target = spawn {
+        Pos3 { x = 0, y = 0, z = 30 },
+        Health { hp = 10 },
+        tags [Combatant, Spatial]
+    };
+    spawn {
+        Pos3 { x = 0, y = 0, z = 0 },
+        Arrow { sender = target },
+        tags [Projectile, Spatial]
+    };
+    run(max, ticks: 35);
+    std.println("arrow demo done");
     return 0;
 }

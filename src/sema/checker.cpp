@@ -637,7 +637,11 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
 
     if (base->kind == Expr::Kind::Identifier && base->str == "spatial") {
       for (auto& a : call.args) infer(*a.value);
-      call.type = Type::make(TypeKind::Unknown);
+      std::vector<std::string> comps;
+      if (!call.args.empty() && call.args[0].value->kind == Expr::Kind::Identifier) {
+        comps.push_back(call.args[0].value->str);
+      }
+      call.type = Type::snapshot(comps);
       return call.type;
     }
 

@@ -583,7 +583,33 @@ No tag query in the program → no tag machinery emitted (§10 zero-cost).
 
 ---
 
-## 20. Example: Complete Program (Reference)
+## 21. Implementation Status
+
+| Phase | Status | Notes |
+|---|---|---|
+| M0 spec | done | this document |
+| M1 lexer/parser | done | 38 tests |
+| M2 type checker | done | 27 tests |
+| M3 interaction analysis | done | 10 tests |
+| M4 LLVM codegen | done | native executables, monomorphized generics |
+| M5 runtime v1 | done | SoA stores, tick loop, frozen view |
+| M6 multi-box | done | parallel boxes (pthreads), deterministic routing, core-count invariance proven (1 box == 8 boxes, byte-identical) |
+| M7 migration | done | deterministic rebalancing; migration is semantically invisible (frozen iteration sorted by entity ID) |
+| M8 stdlib v1 | done | kx.spatial (Pos3, Spatial tag, `spatial.Overlap/Nearby` with inline distance filter), arrow demo |
+| collections (`List`/`Map`) | planned | needed for the spatial grid index |
+| kx.spatial grid index | planned | replace O(N) distance scan with a hash grid once collections land |
+
+Core guarantees verified end-to-end:
+- **Zero data races** — live data only touched by the owning box; others always read the frozen view
+- **Core-count invariance** — identical output for any `cores` value
+- **Migration invariance** — forced migration produces byte-identical results
+- **Determinism** — repeated runs identical
+
+Run with `kxc build <dir> <out>`; `KUBEXIC_CORES` env var controls box count (default: all cores).
+
+---
+
+## 22. Example: Complete Program (Reference)
 
 ```
 samples/arrow/

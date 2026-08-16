@@ -1,3 +1,4 @@
-// Tags.kx
+// Tags.kx — kx.spatial requires the Spatial tag
 tag Combatant;
 tag Projectile;
+tag Spatial;

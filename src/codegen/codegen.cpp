@@ -1173,34 +1173,124 @@ void Codegen::genStmt(const Stmt& s) {
       return;
     }
     case Stmt::Kind::Foreach: {
-      auto handle = genExpr(*s.container);
       std::string tag;
       bool exact = false;
       uint64_t mask = 0;
+      bool spatialQuery = false;
+      int posComp = -1;
+      int posDim = 0;
+      llvm::Value* center[3] = {nullptr, nullptr, nullptr};
+      llvm::Value* radius = nullptr;
+
       if (s.container && s.container->kind == Expr::Kind::Call) {
         const Expr* callee = s.container->lhs.get();
-        if (callee && callee->kind == Expr::Kind::Identifier && callee->str == "others") {
+        if (callee && callee->kind == Expr::Kind::MemberAccess && callee->lhs &&
+            callee->lhs->kind == Expr::Kind::Identifier && callee->lhs->str == "spatial" &&
+            (callee->member == "Overlap" || callee->member == "Nearby")) {
+          spatialQuery = true;
+          if (tagBits_.find("Spatial") == tagBits_.end()) {
+            error(s.loc, "spatial query requires a 'Spatial' tag");
+            break;
+          }
+          mask = tagSubtree("Spatial");
+          if (s.container->args.size() >= 1 && s.container->args[0].value->kind ==
+                                                      Expr::Kind::Identifier &&
+              checker_.components().count(s.container->args[0].value->str)) {
+            posComp = componentIndex(s.container->args[0].value->str);
+            posDim = (int)compFields_[s.container->args[0].value->str].size();
+            auto i32 = llvm::Type::getInt32Ty(ctx_);
+            llvm::Value* self;
+            if (curSelf_) {
+              self = builder_.CreateLoad(llvm::Type::getInt64Ty(ctx_), curSelf_);
+            } else {
+              self = llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
+            }
+            auto readFn = runtimeFn("kx_comp_read_f64", llvm::Type::getDoubleTy(ctx_),
+                                    {llvm::Type::getInt64Ty(ctx_), i32, i32});
+            auto compC = llvm::ConstantInt::get(i32, posComp);
+            center[0] = builder_.CreateCall(
+                readFn, {self, compC, llvm::ConstantInt::get(i32, 0)});
+            center[1] = builder_.CreateCall(
+                readFn, {self, compC, llvm::ConstantInt::get(i32, 1)});
+            if (posDim > 2) {
+              center[2] = builder_.CreateCall(
+                  readFn, {self, compC, llvm::ConstantInt::get(i32, 2)});
+            } else {
+              center[2] = llvm::ConstantFP::get(llvm::Type::getDoubleTy(ctx_), 0.0);
+            }
+          } else {
+            error(s.loc, "spatial query position must be a component identifier (e.g. Pos3)");
+            break;
+          }
+          if (s.container->args.size() >= 2) {
+            radius = coerce(genExpr(*s.container->args[1].value),
+                            llvm::Type::getDoubleTy(ctx_));
+          } else {
+            radius = llvm::ConstantFP::get(llvm::Type::getDoubleTy(ctx_), 1.0);
+          }
+        } else if (callee && callee->kind == Expr::Kind::Identifier &&
+                   callee->str == "others") {
           extractTagArg(*s.container, &tag, &exact);
           if (!tag.empty()) mask = tagSubtree(tag);
         }
       }
+
+      auto handle = spatialQuery ? builder_.CreateCall(
+                                       runtimeFn("kx_others_begin", llvm::Type::getInt64Ty(ctx_),
+                                                 {llvm::Type::getInt64Ty(ctx_),
+                                                  llvm::Type::getInt32Ty(ctx_)}),
+                                       {llvm::ConstantInt::get(ctx_, llvm::APInt(64, mask)),
+                                        llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0)})
+                                 : genExpr(*s.container);
       auto fn = curFn_;
       auto varAlloca = builder_.CreateAlloca(llvm::Type::getInt64Ty(ctx_));
       builder_.CreateStore(handle, varAlloca);
       auto condBlock = llvm::BasicBlock::Create(ctx_, "fe.cond", fn);
+      auto filterBlock = llvm::BasicBlock::Create(ctx_, "fe.filter", fn);
       auto bodyBlock = llvm::BasicBlock::Create(ctx_, "fe.body", fn);
+      auto skipBlock = llvm::BasicBlock::Create(ctx_, "fe.skip", fn);
       auto exitBlock = llvm::BasicBlock::Create(ctx_, "fe.exit", fn);
       builder_.CreateBr(condBlock);
       builder_.SetInsertPoint(condBlock);
       auto cur = builder_.CreateLoad(llvm::Type::getInt64Ty(ctx_), varAlloca);
       auto done = builder_.CreateICmpEQ(
           cur, llvm::ConstantInt::get(ctx_, llvm::APInt(64, (uint64_t)-1)));
-      builder_.CreateCondBr(done, exitBlock, bodyBlock);
-      builder_.SetInsertPoint(bodyBlock);
-      locals_[s.varName] = varAlloca;
-      loops_.push_back({condBlock, exitBlock});
-      genStmt(*s.bodyStmt);
-      loops_.pop_back();
+      builder_.CreateCondBr(done, exitBlock, filterBlock);
+
+      builder_.SetInsertPoint(filterBlock);
+      if (spatialQuery) {
+        auto i32 = llvm::Type::getInt32Ty(ctx_);
+        auto readFn = runtimeFn("kx_snap_read_f64", llvm::Type::getDoubleTy(ctx_),
+                                {llvm::Type::getInt64Ty(ctx_), i32, i32});
+        llvm::Value* cand[3];
+        for (int d = 0; d < 3; d++) {
+          cand[d] = builder_.CreateCall(
+              readFn, {cur, llvm::ConstantInt::get(i32, posComp),
+                       llvm::ConstantInt::get(i32, d)});
+        }
+        auto dx = builder_.CreateFSub(cand[0], center[0]);
+        auto dy = builder_.CreateFSub(cand[1], center[1]);
+        auto dz = builder_.CreateFSub(cand[2], center[2]);
+        auto d2 = builder_.CreateFAdd(builder_.CreateFMul(dx, dx),
+                                      builder_.CreateFAdd(builder_.CreateFMul(dy, dy),
+                                                          builder_.CreateFMul(dz, dz)));
+        auto r2 = builder_.CreateFMul(radius, radius);
+        auto inRange = builder_.CreateFCmpOLE(d2, r2);
+        llvm::Value* pass = inRange;
+        if (curSelf_) {
+          auto self = builder_.CreateLoad(llvm::Type::getInt64Ty(ctx_), curSelf_);
+          auto snapIdFn = runtimeFn("kx_snap_id", llvm::Type::getInt64Ty(ctx_),
+                                    {llvm::Type::getInt64Ty(ctx_)});
+          auto candId = builder_.CreateCall(snapIdFn, {cur});
+          auto notSelf = builder_.CreateICmpNE(candId, self);
+          pass = builder_.CreateAnd(inRange, notSelf);
+        }
+        builder_.CreateCondBr(pass, bodyBlock, skipBlock);
+      } else {
+        builder_.CreateBr(bodyBlock);
+      }
+
+      builder_.SetInsertPoint(skipBlock);
       auto next = runtimeFn("kx_others_next", llvm::Type::getInt64Ty(ctx_),
                             {llvm::Type::getInt64Ty(ctx_), llvm::Type::getInt64Ty(ctx_),
                              llvm::Type::getInt32Ty(ctx_)});
@@ -1211,6 +1301,14 @@ void Codegen::genStmt(const Stmt& s) {
                                                             exact ? 1 : 0)}),
           varAlloca);
       maybeBr(builder_, condBlock);
+
+      builder_.SetInsertPoint(bodyBlock);
+      locals_[s.varName] = varAlloca;
+      loops_.push_back({skipBlock, exitBlock});
+      genStmt(*s.bodyStmt);
+      loops_.pop_back();
+      maybeBr(builder_, skipBlock);
+
       builder_.SetInsertPoint(exitBlock);
       return;
     }
