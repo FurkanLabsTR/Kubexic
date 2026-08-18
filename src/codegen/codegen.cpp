@@ -1,5 +1,8 @@
 #include "codegen.h"
 
+#include <climits>
+
+#include "clone.h"
 #include "constval.h"
 
 #include "llvm/IR/BasicBlock.h"
@@ -75,14 +78,22 @@ Codegen::Codegen(Checker& checker, const Mir& mir, const std::string& triple)
 
 void Codegen::computeMetadata() {
   compNames_.clear();
+  compIndexMap_.clear();
+  fieldIndexMap_.clear();
   for (const auto& [name, d] : checker_.components()) compNames_.push_back(name);
   std::sort(compNames_.begin(), compNames_.end());
   if (compNames_.size() > 64) errors_.push_back("codegen: too many components (max 64)");
-  for (const auto& name : compNames_) {
-    const Decl* d = checker_.components().at(name);
+  for (size_t i = 0; i < compNames_.size(); i++) {
+    compIndexMap_[compNames_[i]] = (int)i;
+    const Decl* d = checker_.components().at(compNames_[i]);
     std::vector<std::string> fields;
-    for (const auto& f : d->fields) fields.push_back(f.first);
-    compFields_[name] = fields;
+    std::map<std::string, int> fmap;
+    for (size_t fi = 0; fi < d->fields.size(); fi++) {
+      fields.push_back(d->fields[fi].first);
+      fmap[d->fields[fi].first] = (int)fi;
+    }
+    compFields_[compNames_[i]] = fields;
+    fieldIndexMap_[compNames_[i]] = fmap;
   }
 
   tagOrder_.clear();
@@ -135,19 +146,15 @@ uint64_t Codegen::tagSubtree(const std::string& name) const {
 }
 
 int Codegen::componentIndex(const std::string& name) const {
-  for (size_t i = 0; i < compNames_.size(); i++) {
-    if (compNames_[i] == name) return (int)i;
-  }
-  return -1;
+  auto it = compIndexMap_.find(name);
+  return it != compIndexMap_.end() ? it->second : -1;
 }
 
 int Codegen::fieldIndex(const std::string& comp, const std::string& field) const {
-  auto it = compFields_.find(comp);
-  if (it == compFields_.end()) return -1;
-  for (size_t i = 0; i < it->second.size(); i++) {
-    if (it->second[i] == field) return (int)i;
-  }
-  return -1;
+  auto ci = fieldIndexMap_.find(comp);
+  if (ci == fieldIndexMap_.end()) return -1;
+  auto fi = ci->second.find(field);
+  return fi != ci->second.end() ? fi->second : -1;
 }
 
 llvm::Function* Codegen::runtimeFn(const std::string& name, llvm::Type* ret,
@@ -202,6 +209,12 @@ void Codegen::declareEcsRuntime() {
   runtimeFn("kx_stop", voidTy, {});
   runtimeFn("kx_get_dt", f64, {});
   runtimeFn("kx_get_tick", i64, {});
+  runtimeFn("kx_spatial_set_cell_size", voidTy, {f64});
+  runtimeFn("kx_spatial_set_comp", voidTy, {i32, i32, i32, i32, i32});
+  runtimeFn("kx_spatial_set_tag_mask", voidTy, {i64});
+  runtimeFn("kx_spatial_query_begin", i64, {f64, f64, f64, f64});
+  runtimeFn("kx_spatial_query_next", i64, {i64, f64, f64, f64, f64});
+  runtimeFn("kx_spatial_query_count", i64, {f64, f64, f64, f64});
 }
 
 std::shared_ptr<Type> Codegen::fieldType(const std::string& comp, int fieldIdx) {
@@ -821,6 +834,22 @@ llvm::Value* Codegen::genExpr(const Expr& e) {
         }
         return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
       }
+      if (base && base->type && base->type->kind == TypeKind::Struct &&
+          !(base->kind == Expr::Kind::Identifier && locals_.count(base->str))) {
+        auto val = genExpr(*base);
+        auto st = llvm::cast<llvm::StructType>(llvmType(base->type));
+        auto tmp = builder_.CreateAlloca(st);
+        builder_.CreateStore(val, tmp);
+        int idx = 0;
+        auto sit = checker_.structs().find(base->type->name);
+        if (sit != checker_.structs().end()) {
+          for (size_t i = 0; i < sit->second->fields.size(); ++i) {
+            if (sit->second->fields[i].first == e.member) { idx = (int)i; break; }
+          }
+        }
+        auto gep = builder_.CreateStructGEP(st, tmp, idx);
+        return builder_.CreateLoad(st->getElementType(idx), gep);
+      }
       if (base && base->kind == Expr::Kind::MemberAccess) {
         Expr* bb = base->lhs.get();
         if (bb && bb->kind == Expr::Kind::Identifier && bb->type &&
@@ -1246,6 +1275,7 @@ llvm::Value* Codegen::genCall(const Expr& call) {
   if (callee->kind == Expr::Kind::MemberAccess) {
     Expr* base = callee->lhs.get();
     const std::string& member = callee->member;
+
     if (base && base->kind == Expr::Kind::Identifier && base->str == "std") {
       if (member == "println" || member == "print") {
         llvm::Value* arg = call.args.empty()
@@ -1404,8 +1434,10 @@ llvm::Value* Codegen::genCall(const Expr& call) {
       const std::string& m = member;
       if (m == "Substring") {
         auto f = runtimeFn("kx_str_substr", ptr, {ptr, i64, i64});
-        return builder_.CreateCall(f, {obj, valToI64(genExpr(*call.args[0].value)),
-                                       valToI64(genExpr(*call.args[1].value))});
+        llvm::Value* len = call.args.size() < 2
+                               ? llvm::ConstantInt::get(ctx_, llvm::APInt(64, INT64_MAX))
+                               : valToI64(genExpr(*call.args[1].value));
+        return builder_.CreateCall(f, {obj, valToI64(genExpr(*call.args[0].value)), len});
       }
       if (m == "Contains") {
         auto f = runtimeFn("kx_str_contains", llvm::Type::getInt1Ty(ctx_), {ptr, ptr});
@@ -1463,6 +1495,7 @@ llvm::Value* Codegen::genCall(const Expr& call) {
       return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
     }
     if (base && base->type && base->type->isCollection()) {
+
       llvm::Value* obj = genExpr(*base);
       auto i64 = llvm::Type::getInt64Ty(ctx_);
       const std::string& m = member;
@@ -1531,7 +1564,9 @@ llvm::Value* Codegen::genCall(const Expr& call) {
 }
 
 void Codegen::genBlock(const std::vector<StmtPtr>& body) {
+  auto saved = locals_;
   for (const auto& s : body) genStmt(*s);
+  locals_ = saved;
 }
 
 void Codegen::genStmt(const Stmt& s) {
@@ -1951,17 +1986,20 @@ void Codegen::emitFunction(const Decl& d, const std::vector<std::shared_ptr<Type
 
   std::shared_ptr<Type> retType = Type::make(TypeKind::Void);
   std::vector<StmtPtr> emptyBody;
-  const std::vector<StmtPtr>& body = d.body ? d.body->body : emptyBody;
-  if (d.retKind != "void") {
-    if (!params.empty()) {
-      curFnName_ = d.name;
-      retType = checker_.reInferBody(body, params);
+  std::vector<StmtPtr> clone;
+  const std::vector<StmtPtr>* body = d.body ? &d.body->body : &emptyBody;
+  if (!params.empty() || d.retKind == "var") {
+    curFnName_ = d.name;
+    clone = cloneStmts(*body);
+    body = &clone;
+    if (d.retKind != "void") {
+      retType = checker_.reInferBody(*body, params);
       if (!retType) retType = Type::make(TypeKind::Int);
-    } else if (d.retKind == "int") {
-      retType = Type::make(TypeKind::Int);
     } else {
-      retType = Type::make(TypeKind::Void);
+      checker_.reInferBody(*body, params);
     }
+  } else if (d.retKind == "int") {
+    retType = Type::make(TypeKind::Int);
   }
 
   std::vector<llvm::Type*> lparams;
@@ -1987,9 +2025,8 @@ void Codegen::emitFunction(const Decl& d, const std::vector<std::shared_ptr<Type
     }
     ++i;
   }
-  if (d.body) {
-    for (const auto& s : d.body->body) genStmt(*s);
-  }
+
+  for (const auto& s : *body) genStmt(*s);
   auto block = builder_.GetInsertBlock();
   if (block && !block->getTerminator()) {
     if (curRetType_ == llvm::Type::getVoidTy(ctx_)) {
@@ -2056,9 +2093,9 @@ bool Codegen::emitObject(const std::string& objectPath) {
 }
 
 bool Codegen::emitExecutable(const std::string& objectPath, const std::string& runtimeObject,
-                             const std::string& outputPath) {
+                             const std::string& outputPath, const std::string& crossCompiler) {
   if (!emitObject(objectPath)) return false;
-  std::string cmd = "gcc " + objectPath + " " + runtimeObject + " -lpthread -lm";
+  std::string cmd = crossCompiler + " " + objectPath + " " + runtimeObject + " -lpthread -lm";
   for (const auto& lib : linkLibraries()) cmd += " -l" + lib;
   cmd += " -o " + outputPath;
   int rc = std::system(cmd.c_str());

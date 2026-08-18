@@ -724,7 +724,31 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
       }
       if (fn.retKind == "void") call.type = Type::make(TypeKind::Void);
       else if (fn.retKind == "int") call.type = Type::make(TypeKind::Int);
-      else call.type = Type::make(TypeKind::Generic);
+      else if (fn.isExtern) {
+        call.type = typeFromTypeName(fn.retKind, call.loc);
+      } else {
+        std::map<std::string, std::shared_ptr<Type>> params;
+        bool allKnown = true;
+        std::string sig;
+        for (size_t i = 0; i < fn.params.size() && i < call.args.size(); i++) {
+          auto at = call.args[i].value->type;
+          if (!at || at->isUnknownish()) allKnown = false;
+          params[fn.params[i]] = at ? at : Type::make(TypeKind::Unknown);
+          sig += at ? at->describe() : "?";
+          sig += ",";
+        }
+        std::string key = name + "#" + sig;
+        auto cacheIt = reInferCache_.find(key);
+        if (cacheIt == reInferCache_.end()) {
+          reInferCache_[key] = nullptr;
+          std::vector<StmtPtr> emptyBody;
+          auto ret = allKnown ? reInferBody(fn.body ? fn.body->body : emptyBody, params)
+                              : nullptr;
+          reInferCache_[key] = ret ? ret : Type::make(TypeKind::Generic);
+        }
+        auto cached = reInferCache_[key];
+        call.type = cached ? cached : Type::make(TypeKind::Generic);
+      }
       return call.type;
     }
 
@@ -816,7 +840,8 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
       }
       if (m == "abs") {
         if (call.args.size() != 1) error(call.loc, "std.abs requires one argument");
-        auto a = infer(*call.args[0].value);
+        auto a = call.args.empty() ? Type::make(TypeKind::Unknown)
+                                   : infer(*call.args[0].value);
         if (a->kind == TypeKind::Int || a->kind == TypeKind::Long ||
             a->kind == TypeKind::Byte) {
           call.type = a;
@@ -880,7 +905,7 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
       }
       if (m == "NextInt") {
         if (call.args.size() != 1) error(call.loc, "Rng.NextInt requires one argument");
-        infer(*call.args[0].value);
+        if (!call.args.empty()) infer(*call.args[0].value);
         call.type = Type::make(TypeKind::Long);
         return call.type;
       }

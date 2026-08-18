@@ -46,7 +46,7 @@ if [ ! -f build/kxc_lexer.o ] || [ ! -f build/kxc_codegen.o ] || \
   rm -f build/kxc_*.o
   for src in src/lexer/lexer.cpp src/parser/parser.cpp src/sema/types.cpp \
              src/sema/checker.cpp src/mir/mir.cpp src/codegen/codegen.cpp \
-             src/ast/pretty.cpp; do
+             src/ast/pretty.cpp src/ast/clone.cpp; do
     name=$(basename "$src" .cpp)
     g++ "${KXC_FLAGS[@]}" $LLVM_FLAGS \
       -DKX_RUNTIME_SOURCE="\"$(pwd)/runtime/runtime.c\"" -DKX_TRIPLE='"x86_64-pc-linux-gnu"' \
@@ -57,7 +57,8 @@ fi
 g++ "${KXC_FLAGS[@]}" $LLVM_FLAGS \
   -DKX_RUNTIME_SOURCE="\"$(pwd)/runtime/runtime.c\"" -DKX_TRIPLE='"x86_64-pc-linux-gnu"' \
   tools/kxc/main.cpp build/kxc_lexer.o build/kxc_parser.o build/kxc_types.o \
-  build/kxc_checker.o build/kxc_mir.o build/kxc_codegen.o build/kxc_pretty.o $LLVM_LIBS \
+  build/kxc_checker.o build/kxc_mir.o build/kxc_codegen.o build/kxc_pretty.o \
+  build/kxc_clone.o $LLVM_LIBS \
   -o build/kxc
 
 ./build/kxc check-dir samples/arrow

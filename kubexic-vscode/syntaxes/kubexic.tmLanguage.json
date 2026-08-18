@@ -1,0 +1,322 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Kubexic",
+  "scopeName": "source.kubexic",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#dollar-string" },
+    { "include": "#string" },
+    { "include": "#attributes" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#declaration-keywords" },
+    { "include": "#type-keywords" },
+    { "include": "#ecs-keywords" },
+    { "include": "#operators" },
+    { "include": "#punctuation" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.kubexic",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.kubexic",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "beginCaptures": { "0": { "name": "punctuation.definition.comment.begin.kubexic" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.comment.end.kubexic" } }
+        }
+      ]
+    },
+    "dollar-string": {
+      "name": "string.quoted.interpolated.kubexic",
+      "begin": "\\$\"",
+      "end": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.kubexic" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.kubexic" }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.kubexic",
+          "match": "\\\\(n|t|r|0|\\\\|\"|')"
+        },
+        {
+          "name": "meta.interpolation.kubexic",
+          "begin": "\\{",
+          "end": "\\}",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.interpolation.begin.kubexic" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.interpolation.end.kubexic" }
+          },
+          "patterns": [
+            { "include": "source.kubexic" }
+          ]
+        }
+      ]
+    },
+    "string": {
+      "name": "string.quoted.double.kubexic",
+      "begin": "\"",
+      "end": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.kubexic" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.kubexic" }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.kubexic",
+          "match": "\\\\(n|t|r|0|\\\\|\"|')"
+        }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "name": "storage.type.annotation.kubexic",
+          "match": "\\[\\s*(Order|FastMath|Link)\\s*(\\([^\\)]*\\))?\\s*\\]"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.kubexic",
+          "match": "\\b(if|else|while|for|foreach|in|switch|case|default|break|continue|return)\\b"
+        },
+        {
+          "name": "keyword.other.kubexic",
+          "match": "\\b(with|without|tags|is|exact|new|using)\\b"
+        },
+        {
+          "name": "constant.language.boolean.kubexic",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "support.constant.kubexic",
+          "match": "\\b(EntityId\\.None|max)\\b"
+        }
+      ]
+    },
+    "declaration-keywords": {
+      "patterns": [
+        {
+          "name": "storage.type.kubexic",
+          "match": "\\b(component|system|tag|struct|enum)\\b"
+        }
+      ]
+    },
+    "type-keywords": {
+      "patterns": [
+        {
+          "name": "storage.type.kubexic",
+          "match": "\\b(var|void|int|long|float|double|bool|byte|string)\\b"
+        },
+        {
+          "name": "storage.modifier.kubexic",
+          "match": "\\b(const|extern)\\b"
+        }
+      ]
+    },
+    "ecs-keywords": {
+      "patterns": [
+        {
+          "name": "keyword.other.kubexic",
+          "match": "\\b(spawn|despawn|attach|detach|panic|run)\\b"
+        },
+        {
+          "name": "variable.language.self.kubexic",
+          "match": "\\b(self)\\b"
+        },
+        {
+          "name": "support.namespace.kubexic",
+          "match": "\\b(std|spatial|others)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.kubexic",
+          "match": "\\b0[xX][0-9a-fA-F]+\\b"
+        },
+        {
+          "name": "constant.numeric.float.kubexic",
+          "match": "\\b[0-9]+\\.[0-9]+([eE][+-]?[0-9]+)?[fF]?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.kubexic",
+          "match": "\\b[0-9]+[Ll]?\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.comparison.kubexic",
+          "match": "(==|!=|<=|>=)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.kubexic",
+          "match": "(\\+\\+|--)"
+        },
+        {
+          "name": "keyword.operator.assignment.kubexic",
+          "match": "(\\+=|-=|\\*=|/=|%=)"
+        },
+        {
+          "name": "keyword.operator.logical.kubexic",
+          "match": "(&&|\\|\\|)"
+        },
+        {
+          "name": "keyword.operator.comparison.kubexic",
+          "match": "(<|>)"
+        },
+        {
+          "name": "keyword.operator.assignment.kubexic",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.arithmetic.kubexic",
+          "match": "(\\+|-|\\*|/|%)"
+        },
+        {
+          "name": "keyword.operator.logical.kubexic",
+          "match": "!"
+        },
+        {
+          "name": "keyword.operator.ternary.kubexic",
+          "match": "\\?"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.terminator.kubexic",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.comma.kubexic",
+          "match": ","
+        },
+        {
+          "name": "punctuation.section.block.begin.kubexic",
+          "match": "\\{"
+        },
+        {
+          "name": "punctuation.section.block.end.kubexic",
+          "match": "\\}"
+        },
+        {
+          "name": "punctuation.section.parens.begin.kubexic",
+          "match": "\\("
+        },
+        {
+          "name": "punctuation.section.parens.end.kubexic",
+          "match": "\\)"
+        },
+        {
+          "name": "punctuation.section.brackets.begin.kubexic",
+          "match": "\\["
+        },
+        {
+          "name": "punctuation.section.brackets.end.kubexic",
+          "match": "\\]"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "match": "\\b(system)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.kubexic" },
+            "2": { "name": "entity.name.function.kubexic" }
+          }
+        },
+        {
+          "match": "\\b(component)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.kubexic" },
+            "2": { "name": "entity.name.type.class.kubexic" }
+          }
+        },
+        {
+          "match": "\\b(tag)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.kubexic" },
+            "2": { "name": "entity.name.tag.kubexic" }
+          }
+        },
+        {
+          "match": "\\b(struct)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.kubexic" },
+            "2": { "name": "entity.name.type.class.kubexic" }
+          }
+        },
+        {
+          "match": "\\b(enum)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.kubexic" },
+            "2": { "name": "entity.name.type.enum.kubexic" }
+          }
+        },
+        {
+          "match": "\\b(var|fun|void|int|long|float|double|bool|byte|string)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=\\()",
+          "captures": {
+            "1": { "name": "storage.type.kubexic" },
+            "2": { "name": "entity.name.function.kubexic" }
+          }
+        },
+        {
+          "match": "\\b(const)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.modifier.kubexic" },
+            "2": { "name": "variable.other.constant.kubexic" }
+          }
+        },
+        {
+          "match": "\\b(tag:)\\s*([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.kubexic" },
+            "2": { "name": "entity.name.tag.kubexic" }
+          }
+        },
+        {
+          "match": "\\b(exact)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.kubexic" },
+            "2": { "name": "entity.name.tag.kubexic" }
+          }
+        },
+        {
+          "match": "\\b([A-Z][a-zA-Z0-9_]*)\\.([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "entity.name.type.class.kubexic" },
+            "2": { "name": "variable.other.field.kubexic" }
+          }
+        },
+        {
+          "name": "variable.other.kubexic",
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\b"
+        },
+        {
+          "name": "entity.name.type.class.kubexic",
+          "match": "\\b([A-Z][a-zA-Z0-9_]*)\\b"
+        }
+      ]
+    }
+  }
+}

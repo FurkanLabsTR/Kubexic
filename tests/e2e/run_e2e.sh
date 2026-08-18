@@ -148,5 +148,108 @@ fi
 PASS=$((PASS + 1))
 echo "e2e features (switch/strings/overloads/without/exact tags/rng, 1 box == 8 boxes): PASS"
 
-echo "e2e: $PASS/8 checks passed"
+./build/kxc build samples/selfhost_lexer build/e2e_lexer_kx
+LEX=$(timeout 15 ./build/e2e_lexer_kx samples/arrow)
+check_tokens() {
+  local file=$1 expected=$2
+  local got
+  got=$(echo "$LEX" | awk -v f="$file" '$0 == "== " f " ==" {found=1; next} found && /-- [0-9]+ tokens/ {print $2; exit}')
+  if [ "$got" != "$expected" ]; then
+    echo "e2e selfhost lexer: FAIL ($file expected $expected got $got)"
+    exit 1
+  fi
+}
+check_tokens "samples/arrow/Health.kx" 14
+check_tokens "samples/arrow/Damage.kx" 16
+check_tokens "samples/arrow/ArrowSystem.kx" 57
+check_tokens "samples/arrow/DamageSystem.kx" 57
+check_tokens "samples/arrow/main.kx" 92
+check_tokens "samples/arrow/Pos3.kx" 19
+PASS=$((PASS + 1))
+echo "e2e selfhost lexer (Kubexic lexing Kubexic, matches C++ lexer): PASS"
+
+./build/kxc build samples/selfhost build/e2e_parser_kx
+PARSE_MISMATCH=0
+for dir in samples/arrow samples/ecs samples/collections samples/features samples/rebalance samples/selfhost_lexer samples/selfhost; do
+  for f in "$dir"/*.kx; do
+    P1=$(timeout 15 ./build/e2e_parser_kx "$f" 2>/dev/null)
+    P2=$(./build/kxc dump "$f" 2>/dev/null)
+    if [ "$P1" != "$P2" ]; then
+      echo "e2e selfhost parser: FAIL ($f)"
+      PARSE_MISMATCH=1
+    fi
+  done
+done
+if [ "$PARSE_MISMATCH" != "0" ]; then exit 1; fi
+PASS=$((PASS + 1))
+echo "e2e selfhost parser (Kubexic parser dump == kxc dump on all samples): PASS"
+
+# selfhost checker: the Kubexic checker must produce byte-identical output to the
+# C++ checker on valid files AND on deliberately broken programs.
+./build/kxc build samples/selfhost_checker build/e2e_checker_kx
+BROKEN_DIR=/tmp/opencode/e2e_broken
+rm -rf "$BROKEN_DIR"
+mkdir -p "$BROKEN_DIR"
+cat > "$BROKEN_DIR/binop.kx" <<'KX'
+int main() {
+    var y = "s" + 5;
+    return 0;
+}
+KX
+cat > "$BROKEN_DIR/unknown_fn.kx" <<'KX'
+int main() {
+    Missing(1);
+    return 0;
+}
+KX
+cat > "$BROKEN_DIR/duplicate.kx" <<'KX'
+struct Point {
+    var x = 0;
+}
+struct Point {
+    var y = 0;
+}
+int main() { return 0; }
+KX
+cat > "$BROKEN_DIR/switch.kx" <<'KX'
+int main() {
+    switch (5) {
+        case 1 + 2:
+            return 0;
+    }
+    return 0;
+}
+KX
+cat > "$BROKEN_DIR/others.kx" <<'KX'
+component Pos {
+    var x = 0;
+}
+system Move {
+    foreach (var e in others<Pos>()) {
+        e.Pos.x = 5;
+    }
+}
+int main() { return 0; }
+KX
+cat > "$BROKEN_DIR/parse.kx" <<'KX'
+system S {
+    attach { x = 1 };
+}
+int main() { return 0; }
+KX
+for f in "$BROKEN_DIR"/*.kx samples/hello/hello.kx samples/arrow/DamageSystem.kx; do
+  NAME=$(basename "$f")
+  CPP=$(./build/kxc check "$f" 2>&1 | grep -v '^REINFER' || true)
+  KX=$(./build/e2e_checker_kx "$f" 2>&1 || true)
+  if [ "$CPP" != "$KX" ]; then
+    echo "e2e selfhost checker: FAIL ($NAME)"
+    echo "--- C++ checker ---"; echo "$CPP"
+    echo "--- Kubexic checker ---"; echo "$KX"
+    exit 1
+  fi
+done
+PASS=$((PASS + 1))
+echo "e2e selfhost checker (Kubexic checker output == C++ checker on broken+valid programs): PASS"
+
+echo "e2e: $PASS/11 checks passed"
 exit 0

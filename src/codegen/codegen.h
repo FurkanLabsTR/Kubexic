@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace kx {
@@ -21,7 +22,7 @@ class Codegen {
 
   bool emitObject(const std::string& objectPath);
   bool emitExecutable(const std::string& objectPath, const std::string& runtimeObject,
-                      const std::string& outputPath);
+                      const std::string& outputPath, const std::string& crossCompiler = "gcc");
   const std::vector<std::string>& errors() const { return errors_; }
 
  private:
@@ -101,6 +102,8 @@ class Codegen {
 
   std::vector<std::string> compNames_;
   std::map<std::string, std::vector<std::string>> compFields_;
+  std::unordered_map<std::string, int> compIndexMap_;
+  std::map<std::string, std::map<std::string, int>> fieldIndexMap_;
   std::map<std::string, uint64_t> tagBits_;
   std::map<std::string, std::string> tagParents_;
   std::vector<std::string> tagOrder_;

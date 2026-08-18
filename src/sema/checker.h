@@ -46,6 +46,7 @@ class Checker {
 
   std::vector<std::vector<Local>> scopes_;
   std::vector<std::string> errors_;
+  std::map<std::string, std::shared_ptr<Type>> reInferCache_;
 
   std::string curFnName_;
   std::string curFnRet_;

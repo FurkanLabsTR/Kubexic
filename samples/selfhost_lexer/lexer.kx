@@ -1,0 +1,211 @@
+// Lexer.kx — the Kubexic tokenizer, written in Kubexic.
+// This is the first self-hosted compiler component.
+
+struct Token {
+    var kind = "";
+    var text = "";
+    var line = 0;
+    var col = 0;
+}
+
+var IsDigit(c) {
+    return c >= "0" && c <= "9";
+}
+
+var IsLetter(c) {
+    return (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
+}
+
+var IsIdentPart(c) {
+    return IsLetter(c) || IsDigit(c) || c == "_";
+}
+
+var IsSpace(c) {
+    return c == " " || c == "\t" || c == "\n" || c == "\r";
+}
+
+var CharAt(s, i) {
+    if (i < 0 || i >= s.Length) {
+        return "";
+    }
+    return s.Substring(i, 1);
+}
+
+var LexAll(src) {
+    var tokens = List<Token>();
+    var pos = 0;
+    var line = 1;
+    var col = 1;
+    var n = src.Length;
+    while (pos < n) {
+        var c = CharAt(src, pos);
+        if (IsSpace(c)) {
+            pos++;
+            col++;
+            if (c == "\n") {
+                line++;
+                col = 1;
+            }
+            continue;
+        }
+        if (c == "/" && CharAt(src, pos + 1) == "/") {
+            while (pos < n && CharAt(src, pos) != "\n") {
+                pos++;
+                col++;
+            }
+            continue;
+        }
+        if (c == "/" && CharAt(src, pos + 1) == "*") {
+            pos += 2;
+            col += 2;
+            while (pos < n && !(CharAt(src, pos) == "*" && CharAt(src, pos + 1) == "/")) {
+                if (CharAt(src, pos) == "\n") {
+                    line++;
+                    col = 1;
+                } else {
+                    col++;
+                }
+                pos++;
+            }
+            pos += 2;
+            col += 2;
+            continue;
+        }
+        if (IsLetter(c) || c == "_") {
+            var start = pos;
+            var startCol = col;
+            var startLine = line;
+            while (pos < n && IsIdentPart(CharAt(src, pos))) {
+                pos++;
+                col++;
+            }
+            var text = src.Substring(start, pos - start);
+            var kind = "id";
+            if (text == "component" || text == "system" || text == "tag" ||
+                text == "struct" || text == "enum" || text == "const" ||
+                text == "var" || text == "void" || text == "int" ||
+                text == "long" || text == "float" || text == "double" ||
+                text == "bool" || text == "byte" || text == "string" ||
+                text == "if" || text == "else" || text == "while" ||
+                text == "for" || text == "foreach" || text == "in" ||
+                text == "break" || text == "continue" || text == "return" ||
+                text == "spawn" || text == "despawn" || text == "attach" ||
+                text == "detach" || text == "self" || text == "with" ||
+                text == "without" || text == "new" || text == "tags" ||
+                text == "using" || text == "true" || text == "false" ||
+                text == "is" || text == "exact" || text == "panic" ||
+                text == "switch" || text == "case" || text == "default" ||
+                text == "extern") {
+                kind = "kw";
+            }
+            tokens.Add(Token { kind = kind, text = text, line = startLine, col = startCol });
+            continue;
+        }
+        if (IsDigit(c)) {
+            var start = pos;
+            var startCol = col;
+            var startLine = line;
+            var isFloat = false;
+            while (pos < n && IsDigit(CharAt(src, pos))) {
+                pos++;
+                col++;
+            }
+            if (CharAt(src, pos) == "." && IsDigit(CharAt(src, pos + 1))) {
+                isFloat = true;
+                pos++;
+                col++;
+                while (pos < n && IsDigit(CharAt(src, pos))) {
+                    pos++;
+                    col++;
+                }
+            }
+            var text = src.Substring(start, pos - start);
+            tokens.Add(Token { kind = isFloat ? "float" : "int", text = text,
+                               line = startLine, col = startCol });
+            continue;
+        }
+        if (c == "$" && CharAt(src, pos + 1) == "\"") {
+            var startCol = col;
+            var startLine = line;
+            pos += 2;
+            col += 2;
+            var text = "";
+            while (pos < n && CharAt(src, pos) != "\"") {
+                text += CharAt(src, pos);
+                pos++;
+                col++;
+            }
+            pos++;
+            col++;
+            tokens.Add(Token { kind = "dstr", text = text, line = startLine, col = startCol });
+            continue;
+        }
+        if (c == "\"") {
+            var startCol = col;
+            var startLine = line;
+            pos++;
+            col++;
+            var text = "";
+            while (pos < n && CharAt(src, pos) != "\"") {
+                if (CharAt(src, pos) == "\\" && pos + 1 < n) {
+                    text += CharAt(src, pos);
+                    text += CharAt(src, pos + 1);
+                    pos += 2;
+                    col += 2;
+                } else {
+                    text += CharAt(src, pos);
+                    pos++;
+                    col++;
+                }
+            }
+            pos++;
+            col++;
+            tokens.Add(Token { kind = "string", text = text, line = startLine, col = startCol });
+            continue;
+        }
+        var two = src.Substring(pos, 2);
+        if (two == "==" || two == "!=" || two == "<=" || two == ">=" ||
+            two == "&&" || two == "||" || two == "+=" || two == "-=" ||
+            two == "*=" || two == "/=" || two == "%=" || two == "++" ||
+            two == "--") {
+            tokens.Add(Token { kind = "op", text = two, line = line, col = col });
+            pos += 2;
+            col += 2;
+            continue;
+        }
+        tokens.Add(Token { kind = "punct", text = c, line = line, col = col });
+        pos++;
+        col++;
+    }
+    tokens.Add(Token { kind = "eof", text = "", line = line, col = col });
+    return tokens;
+}
+
+int main() {
+    var dir = "samples/arrow";
+    var args = std.args();
+    if (args.Count > 0) {
+        dir = args.Get(0);
+    }
+    var files = std.listDir(dir);
+    foreach (var f in files) {
+        if (!f.EndsWith(".kx")) {
+            continue;
+        }
+        var path = $"{dir}/{f}";
+        var content = std.readFile(path);
+        if (content is string s) {
+            std.println($"== {path} ==");
+            var toks = LexAll(s);
+            var count = 0;
+            foreach (var t in toks) {
+                if (t.kind != "eof") {
+                    std.println($"{t.line}:{t.col} {t.kind} {t.text}");
+                    count++;
+                }
+            }
+            std.println($"-- {count} tokens");
+        }
+    }
+    return 0;
+}

@@ -1,0 +1,40 @@
+#!/bin/bash
+set -e
+KXC_DIR="$(cd "$(dirname "$0")" && pwd)"
+CODEGEN="$KXC_DIR/build/codegen_kx"
+RUNTIME="$KXC_DIR/build/runtime.o"
+LLC="llc-21"
+GCC="gcc"
+
+if [ $# -lt 1 ]; then
+    echo "usage: kubexic <command> [args...]"
+    echo "commands: build <input.kx> <output> | check <file.kx> | run <file.kx>"
+    exit 1
+fi
+
+CMD="$1"
+shift
+
+case "$CMD" in
+    build)
+        INPUT="$1"; OUTPUT="$2"
+        TMP_LL="${OUTPUT}.ll"; TMP_O="${OUTPUT}.o"
+        $CODEGEN "$INPUT" "$TMP_LL"
+        $LLC -relocation-model=pic -filetype=obj "$TMP_LL" -o "$TMP_O"
+        $GCC "$TMP_O" "$RUNTIME" -lpthread -lm -o "$OUTPUT"
+        rm -f "$TMP_LL" "$TMP_O"
+        echo "built $OUTPUT"
+        ;;
+    check)
+        $KXC_DIR/build/kxc check "$1"
+        ;;
+    run)
+        INPUT="$1"; TMP="/tmp/kubexic_run_$$.out"
+        $KXC_DIR/kubexic build "$INPUT" "$TMP"
+        "$TMP"; rm -f "$TMP"
+        ;;
+    *)
+        echo "unknown command: $CMD"
+        exit 1
+        ;;
+esac

@@ -1,0 +1,72 @@
+{
+  "name": "kubexic",
+  "displayName": "Kubexic",
+  "description": "Language support for Kubexic (.kx) — ECS-first compiled language",
+  "version": "0.1.1",
+  "publisher": "kubexic",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:kubexic"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "kubexic",
+        "aliases": [
+          "Kubexic",
+          "kubexic"
+        ],
+        "extensions": [
+          ".kx"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "kubexic",
+        "scopeName": "source.kubexic",
+        "path": "./syntaxes/kubexic.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "kubexic.check",
+        "title": "Kubexic: Check Project for Errors"
+      }
+    ],
+    "configuration": {
+      "title": "Kubexic",
+      "properties": {
+        "kubexic.kxcPath": {
+          "type": "string",
+          "default": "kxc",
+          "description": "Path to the kxc compiler binary"
+        },
+        "kubexic.checkOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run diagnostics on file save"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p . && esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --target=node18 --minify",
+    "watch": "tsc -watch -p .",
+    "package": "npm run compile && npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {}
+}

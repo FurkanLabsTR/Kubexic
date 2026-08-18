@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ page.title }} | {{ site.title }}</title>
+  <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}">
+</head>
+<body>
+  <nav class="nav">
+    <div class="nav-inner">
+      <a class="nav-brand" href="{{ '/' | relative_url }}">Kubexic</a>
+      <div class="nav-links">
+        <a href="{{ '/getting-started/' | relative_url }}">Getting Started</a>
+        <a href="{{ '/basics/' | relative_url }}">Language Basics</a>
+        <a href="{{ '/ecs/' | relative_url }}">ECS Guide</a>
+        <a href="{{ '/collections/' | relative_url }}">Collections</a>
+        <a href="{{ '/cli/' | relative_url }}">CLI Reference</a>
+        <a href="{{ '/vscode/' | relative_url }}">VS Code</a>
+        <a href="https://github.com/kubexic/kubexic">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <main class="content">
+    {{ content }}
+  </main>
+
+  <footer class="footer">
+    <p>Kubexic Language Documentation</p>
+  </footer>
+</body>
+</html>

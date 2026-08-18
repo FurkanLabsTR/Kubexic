@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <ctype.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -353,6 +354,10 @@ typedef struct {
   long long fSize;
   void** fFields;
   void** fzFields;
+
+  int* freeSlots;
+  int freeTop;
+  int freeCap;
 } kx_box;
 
 static int g_compCount;
@@ -372,6 +377,34 @@ static long long* g_frozenTagMasks;
 static long long* g_frozenCompMasks;
 static void** g_frozenFields;
 static long long g_frozenSize;
+static long long g_frozenCap = 0;
+
+/* ---- tag index (per-bit inverted index over frozen view) ---- */
+
+static long long** g_tagIdx;
+static long long*  g_tagIdxSize;
+static long long*  g_tagIdxCap;
+static int g_tagIdxBuilt = 0;
+
+/* ---- spatial hash grid ---- */
+
+typedef struct {
+  long long* entries;
+  long long size;
+  long long cap;
+} kx_cell;
+
+static kx_cell* g_spatialGrid = NULL;
+static long long g_gridCells = 0;
+static int g_gridMask = 0;
+static double g_spatialCellSize = 1.0;
+static int g_spatialComp = -1;
+static int g_spatialFieldX = 0;
+static int g_spatialFieldY = 1;
+static int g_spatialFieldZ = 2;
+static int g_spatialDims = 3;
+static int g_spatialBuilt = 0;
+static long long g_spatialSubtreeMask = 0;
 
 static int g_sysCount;
 static long long* g_sysMatch;
@@ -384,6 +417,7 @@ static long long g_tick;
 static double g_dt;
 static volatile int g_stop;
 static volatile int g_inRun;
+static int g_traceEnabled = 0;
 
 static long long g_spawnCounter;
 static pthread_mutex_t g_spawnLock = PTHREAD_MUTEX_INITIALIZER;
@@ -476,6 +510,14 @@ static void bufAppend(int idx, const char* s) {
   if (idx < 0 || idx > KX_MAX_BOXES) return;
   kx_buffer* b = &g_buffers[idx];
   size_t n = strlen(s);
+  if (n >= KX_BUF_CAP) {
+    if (b->len > 0) {
+      fwrite(b->data, 1, b->len, stdout);
+      b->len = 0;
+    }
+    fwrite(s, 1, n, stdout);
+    return;
+  }
   if (b->len + (int)n >= KX_BUF_CAP) {
     fwrite(b->data, 1, b->len, stdout);
     b->len = 0;
@@ -560,6 +602,7 @@ static void createBoxes(int count) {
       free(g_boxes[i].fComps);
       free(g_boxes[i].fFields);
       free(g_boxes[i].fzFields);
+      free(g_boxes[i].freeSlots);
       pthread_mutex_destroy(&g_boxes[i].allocLock);
     }
     free(g_boxes);
@@ -592,6 +635,9 @@ static void createBoxes(int count) {
       b->qCap[s] = 64;
       b->queues[s] = (kx_req*)malloc(sizeof(kx_req) * 64);
     }
+    b->freeSlots = NULL;
+    b->freeTop = -1;
+    b->freeCap = 0;
   }
   g_frozenIds = (long long*)realloc(g_frozenIds, sizeof(long long) * g_boxCount * KX_INIT_ENTITIES);
   g_frozenTagMasks =
@@ -615,7 +661,7 @@ static void applyRequest(kx_entity e, const kx_req* r) {
   kx_box* b;
   long long slot;
   if (!resolve(e, &b, &slot)) return;
-  if (getenv("KX_TRACE") && (r->kind == REQ_ENSURE || r->kind == REQ_DETACH ||
+  if (g_traceEnabled && (r->kind == REQ_ENSURE || r->kind == REQ_DETACH ||
                              r->kind == REQ_DESPAWN)) {
     char line[256];
     const char* kind = r->kind == REQ_ENSURE ? "attach" :
@@ -680,6 +726,11 @@ static void applyRequest(kx_entity e, const kx_req* r) {
       if (b->gens[slot] == 0) b->gens[slot] = 1;
       b->tagMasks[slot] = 0;
       b->compMasks[slot] = 0;
+      if (b->freeTop + 1 >= b->freeCap) {
+        b->freeCap = b->freeCap ? b->freeCap * 2 : 64;
+        b->freeSlots = (int*)realloc(b->freeSlots, sizeof(int) * b->freeCap);
+      }
+      b->freeSlots[++b->freeTop] = (int)slot;
       break;
     }
   }
@@ -747,12 +798,16 @@ kx_entity kx_spawn(long long tagMask) {
   kx_box* b = &g_boxes[target];
   pthread_mutex_lock(&b->allocLock);
   long long slot = -1;
-  for (int i = 0; i < b->size; i++) {
-    if (!slotAlive(b, i)) { slot = i; break; }
-  }
-  if (slot < 0) {
-    slot = b->size++;
-    if (b->size > b->cap) growBox(b);
+  if (b->freeTop >= 0) {
+    slot = b->freeSlots[b->freeTop--];
+  } else {
+    for (int i = 0; i < b->size; i++) {
+      if (!slotAlive(b, i)) { slot = i; break; }
+    }
+    if (slot < 0) {
+      slot = b->size++;
+      if (b->size > b->cap) growBox(b);
+    }
   }
   b->gens[slot] = (b->gens[slot] + 1) & 0xFFFF;
   if (b->gens[slot] == 0) b->gens[slot] = 1;
@@ -911,11 +966,8 @@ typedef struct {
 static kx_fent* g_sortBuf;
 static int g_sortCap;
 
-static int cmpFent(const void* a, const void* b) {
-  long long x = ((const kx_fent*)a)->id;
-  long long y = ((const kx_fent*)b)->id;
-  return x < y ? -1 : (x > y ? 1 : 0);
-}
+static void freeTagIdx(void);
+static void buildTagIdx(void);
 
 static void growGlobalFrozen(long long minSlots);
 
@@ -930,39 +982,291 @@ static void mergeFrozen(void) {
     g_frozenCompMasks = (long long*)realloc(g_frozenCompMasks, sizeof(long long) * cap);
     growGlobalFrozen(total);
   }
+  if (total == 0) {
+    g_frozenSize = 0;
+    buildTagIdx();
+    return;
+  }
   if (total > g_sortCap) {
     g_sortCap = total > 0 ? total : 1;
     g_sortBuf = (kx_fent*)realloc(g_sortBuf, sizeof(kx_fent) * g_sortCap);
   }
-  long long n = 0;
+  int heapSize = 0;
+  int heapBoxes[KX_MAX_BOXES];
+  long long heapIdx[KX_MAX_BOXES];
   for (int i = 0; i < g_boxCount; i++) {
     kx_box* b = &g_boxes[i];
-    for (long long j = 0; j < b->fSize; j++) {
-      g_sortBuf[n].id = b->fIds[j];
-      g_sortBuf[n].box = i;
-      g_sortBuf[n].idx = j;
-      n++;
+    if (b->fSize == 0) continue;
+    int pos = heapSize++;
+    heapBoxes[pos] = i;
+    heapIdx[pos] = 0;
+    while (pos > 0) {
+      int parent = (pos - 1) / 2;
+      long long pv = g_boxes[heapBoxes[parent]].fIds[heapIdx[parent]];
+      long long cv = g_boxes[i].fIds[heapIdx[pos]];
+      if (cv < pv) {
+        int tb = heapBoxes[parent]; long long ti = heapIdx[parent];
+        heapBoxes[parent] = heapBoxes[pos]; heapIdx[parent] = heapIdx[pos];
+        heapBoxes[pos] = tb; heapIdx[pos] = ti;
+        pos = parent;
+      } else break;
     }
   }
-  qsort(g_sortBuf, n, sizeof(kx_fent), cmpFent);
   long long fs = 0;
-  for (long long k = 0; k < n; k++) {
-    kx_box* b = &g_boxes[g_sortBuf[k].box];
-    long long j = g_sortBuf[k].idx;
-    g_frozenIds[fs] = b->fIds[j];
-    g_frozenTagMasks[fs] = b->fTags[j];
-    long long cm = b->fComps[j];
+  while (heapSize > 0) {
+    int bi = heapBoxes[0];
+    long long sj = heapIdx[0];
+    kx_box* b = &g_boxes[bi];
+    g_frozenIds[fs] = b->fIds[sj];
+    g_frozenTagMasks[fs] = b->fTags[sj];
+    long long cm = b->fComps[sj];
     g_frozenCompMasks[fs] = cm;
     for (int c = 0; c < g_compCount; c++) {
       if (!(cm & (1LL << c))) continue;
       for (int f = 0; f < g_fieldCounts[c]; f++) {
         memcpy((char*)g_frozenFields[c * KX_MAX_FIELDS + f] + fs * 8,
-               (char*)b->fzFields[c * KX_MAX_FIELDS + f] + j * 8, 8);
+               (char*)b->fzFields[c * KX_MAX_FIELDS + f] + sj * 8, 8);
       }
     }
     fs++;
+    long long nextIdx = sj + 1;
+    if (nextIdx < b->fSize) {
+      heapIdx[0] = nextIdx;
+    } else {
+      heapBoxes[0] = heapBoxes[--heapSize];
+      heapIdx[0] = heapIdx[heapSize];
+    }
+    int pos = 0;
+    for (;;) {
+      int left = pos * 2 + 1;
+      int right = left + 1;
+      int smallest = pos;
+      if (left < heapSize) {
+        long long lv = g_boxes[heapBoxes[left]].fIds[heapIdx[left]];
+        long long sv = g_boxes[heapBoxes[pos]].fIds[heapIdx[pos]];
+        if (lv < sv) smallest = left;
+      }
+      if (right < heapSize) {
+        long long rv = g_boxes[heapBoxes[right]].fIds[heapIdx[right]];
+        long long sv = g_boxes[heapBoxes[smallest]].fIds[heapIdx[smallest]];
+        if (rv < sv) smallest = right;
+      }
+      if (smallest == pos) break;
+      int tb = heapBoxes[pos]; long long ti = heapIdx[pos];
+      heapBoxes[pos] = heapBoxes[smallest]; heapIdx[pos] = heapIdx[smallest];
+      heapBoxes[smallest] = tb; heapIdx[smallest] = ti;
+      pos = smallest;
+    }
   }
   g_frozenSize = fs;
+  buildTagIdx();
+}
+
+static void buildTagIdx(void) {
+  freeTagIdx();
+  g_tagIdx = (long long**)calloc(KX_MAX_TAGS, sizeof(long long*));
+  g_tagIdxSize = (long long*)calloc(KX_MAX_TAGS, sizeof(long long));
+  g_tagIdxCap = (long long*)calloc(KX_MAX_TAGS, sizeof(long long));
+  for (int bit = 0; bit < KX_MAX_TAGS; bit++) {
+    g_tagIdxCap[bit] = 64;
+    g_tagIdx[bit] = (long long*)malloc(sizeof(long long) * 64);
+  }
+  for (long long i = 0; i < g_frozenSize; i++) {
+    long long tm = g_frozenTagMasks[i];
+    while (tm) {
+      int bit = __builtin_ctzll(tm);
+      long long mask = tm & -tm;
+      if (g_tagIdxSize[bit] >= g_tagIdxCap[bit]) {
+        g_tagIdxCap[bit] *= 2;
+        g_tagIdx[bit] = (long long*)realloc(g_tagIdx[bit], sizeof(long long) * g_tagIdxCap[bit]);
+      }
+      g_tagIdx[bit][g_tagIdxSize[bit]++] = i;
+      tm &= ~mask;
+    }
+  }
+  g_tagIdxBuilt = 1;
+}
+
+static void freeTagIdx(void) {
+  if (g_tagIdx) {
+    for (int bit = 0; bit < KX_MAX_TAGS; bit++) free(g_tagIdx[bit]);
+    free(g_tagIdx);
+  }
+  free(g_tagIdxSize);
+  free(g_tagIdxCap);
+  g_tagIdx = NULL;
+  g_tagIdxSize = NULL;
+  g_tagIdxCap = NULL;
+  g_tagIdxBuilt = 0;
+}
+
+/* ---- spatial hash grid ---- */
+
+void kx_spatial_set_cell_size(double size) { g_spatialCellSize = size > 0.0 ? size : 1.0; }
+
+void kx_spatial_set_comp(int comp, int fx, int fy, int fz, int dims) {
+  g_spatialComp = comp;
+  g_spatialFieldX = fx;
+  g_spatialFieldY = fy;
+  g_spatialFieldZ = fz;
+  g_spatialDims = dims > 0 ? (dims < 3 ? dims : 3) : 3;
+}
+
+void kx_spatial_set_tag_mask(long long mask) { g_spatialSubtreeMask = mask; }
+
+static long long spatialHash(int cx, int cy, int cz) {
+  unsigned long long h = (unsigned long long)cx * 73856093u ^
+                         (unsigned long long)cy * 19349663u ^
+                         (unsigned long long)cz * 83492791u;
+  return (long long)(h & (unsigned long long)g_gridMask);
+}
+
+static void spatialFreeGrid(void) {
+  if (g_spatialGrid) {
+    for (long long i = 0; i < g_gridCells; i++) free(g_spatialGrid[i].entries);
+    free(g_spatialGrid);
+  }
+  g_spatialGrid = NULL;
+  g_gridCells = 0;
+  g_spatialBuilt = 0;
+}
+
+static void cellAdd(kx_cell* cell, long long idx) {
+  if (cell->size >= cell->cap) {
+    cell->cap = cell->cap ? cell->cap * 2 : 8;
+    cell->entries = (long long*)realloc(cell->entries, sizeof(long long) * cell->cap);
+  }
+  cell->entries[cell->size++] = idx;
+}
+
+void kx_spatial_build(void) {
+  spatialFreeGrid();
+  g_gridCells = 1024;
+  g_gridMask = g_gridCells - 1;
+  g_spatialGrid = (kx_cell*)calloc(g_gridCells, sizeof(kx_cell));
+  if (g_spatialComp < 0 || !g_tagIdxBuilt) return;
+  for (long long i = 0; i < g_frozenSize; i++) {
+    if (g_spatialSubtreeMask && !(g_frozenTagMasks[i] & g_spatialSubtreeMask)) continue;
+    if (!(g_frozenCompMasks[i] & (1LL << g_spatialComp))) continue;
+    double x = 0, y = 0, z = 0;
+    double* px = (double*)g_frozenFields[g_spatialComp * KX_MAX_FIELDS + g_spatialFieldX];
+    double* py = (double*)g_frozenFields[g_spatialComp * KX_MAX_FIELDS + g_spatialFieldY];
+    double* pz = (double*)g_frozenFields[g_spatialComp * KX_MAX_FIELDS + g_spatialFieldZ];
+    x = px[i]; y = py[i];
+    if (g_spatialDims >= 3) z = pz[i];
+    int cx = (int)floor(x / g_spatialCellSize);
+    int cy = (int)floor(y / g_spatialCellSize);
+    int cz = (int)floor(z / g_spatialCellSize);
+    long long idx = spatialHash(cx, cy, cz);
+    cellAdd(&g_spatialGrid[idx], i);
+  }
+  g_spatialBuilt = 1;
+}
+
+long long kx_spatial_query_begin(double cx, double cy, double cz, double radius) {
+  if (!g_spatialBuilt || g_spatialComp < 0) {
+    for (long long i = 0; i < g_frozenSize; i++) {
+      if (g_spatialSubtreeMask && !(g_frozenTagMasks[i] & g_spatialSubtreeMask)) continue;
+      if (!(g_frozenCompMasks[i] & (1LL << g_spatialComp))) continue;
+      double* px = (double*)g_frozenFields[g_spatialComp * KX_MAX_FIELDS + g_spatialFieldX];
+      double* py = (double*)g_frozenFields[g_spatialComp * KX_MAX_FIELDS + g_spatialFieldY];
+      double* pz = (double*)g_frozenFields[g_spatialComp * KX_MAX_FIELDS + g_spatialFieldZ];
+      double dx = px[i] - cx, dy = py[i] - cy, dz = (g_spatialDims >= 3 ? pz[i] : 0) - cz;
+      if (dx*dx + dy*dy + dz*dz <= radius*radius) return i;
+    }
+    return -1;
+  }
+  int cellRadius = (int)ceil(radius / g_spatialCellSize);
+  int minCx = (int)floor((cx - radius) / g_spatialCellSize);
+  int maxCx = (int)floor((cx + radius) / g_spatialCellSize);
+  int minCy = (int)floor((cy - radius) / g_spatialCellSize);
+  int maxCy = (int)floor((cy + radius) / g_spatialCellSize);
+  int minCz = (int)floor((cz - radius) / g_spatialCellSize);
+  int maxCz = (int)floor((cz + radius) / g_spatialCellSize);
+  double r2 = radius * radius;
+  for (int ciX = minCx; ciX <= maxCx; ciX++) {
+    for (int ciY = minCy; ciY <= maxCy; ciY++) {
+      for (int ciZ = minCz; ciZ <= maxCz; ciZ++) {
+        long long cellIdx = spatialHash(ciX, ciY, ciZ);
+        kx_cell* cell = &g_spatialGrid[cellIdx];
+        for (long long e = 0; e < cell->size; e++) {
+          long long i = cell->entries[e];
+          if (g_spatialSubtreeMask && !(g_frozenTagMasks[i] & g_spatialSubtreeMask)) continue;
+          if (!(g_frozenCompMasks[i] & (1LL << g_spatialComp))) continue;
+          double* px = (double*)g_frozenFields[g_spatialComp * KX_MAX_FIELDS + g_spatialFieldX];
+          double* py = (double*)g_frozenFields[g_spatialComp * KX_MAX_FIELDS + g_spatialFieldY];
+          double* pz = (double*)g_frozenFields[g_spatialComp * KX_MAX_FIELDS + g_spatialFieldZ];
+          double dx = px[i] - cx, dy = py[i] - cy, dz = (g_spatialDims >= 3 ? pz[i] : 0) - cz;
+          if (dx*dx + dy*dy + dz*dz <= r2) {
+            long long packed = (cellIdx << 32) | (long long)e;
+            return packed;
+          }
+        }
+      }
+    }
+  }
+  return -1;
+}
+
+long long kx_spatial_query_next(long long h, double cx, double cy, double cz, double radius) {
+  if (h < 0) return -1;
+  if (!g_spatialBuilt || g_spatialComp < 0) {
+    for (long long i = h + 1; i < g_frozenSize; i++) {
+      if (g_spatialSubtreeMask && !(g_frozenTagMasks[i] & g_spatialSubtreeMask)) continue;
+      if (!(g_frozenCompMasks[i] & (1LL << g_spatialComp))) continue;
+      double* px = (double*)g_frozenFields[g_spatialComp * KX_MAX_FIELDS + g_spatialFieldX];
+      double* py = (double*)g_frozenFields[g_spatialComp * KX_MAX_FIELDS + g_spatialFieldY];
+      double* pz = (double*)g_frozenFields[g_spatialComp * KX_MAX_FIELDS + g_spatialFieldZ];
+      double dx = px[i] - cx, dy = py[i] - cy, dz = (g_spatialDims >= 3 ? pz[i] : 0) - cz;
+      if (dx*dx + dy*dy + dz*dz <= radius*radius) return i;
+    }
+    return -1;
+  }
+  int minCx = (int)floor((cx - radius) / g_spatialCellSize);
+  int maxCx = (int)floor((cx + radius) / g_spatialCellSize);
+  int minCy = (int)floor((cy - radius) / g_spatialCellSize);
+  int maxCy = (int)floor((cy + radius) / g_spatialCellSize);
+  int minCz = (int)floor((cz - radius) / g_spatialCellSize);
+  int maxCz = (int)floor((cz + radius) / g_spatialCellSize);
+  double r2 = radius * radius;
+  long long startCell = h >> 32;
+  long long startEntry = (long long)(h & 0xFFFFFFFF);
+  for (int ciX = minCx; ciX <= maxCx; ciX++) {
+    for (int ciY = minCy; ciY <= maxCy; ciY++) {
+      for (int ciZ = minCz; ciZ <= maxCz; ciZ++) {
+        long long cellIdx = spatialHash(ciX, ciY, ciZ);
+        kx_cell* cell = &g_spatialGrid[cellIdx];
+        long long eStart = 0;
+        if (cellIdx == startCell) {
+          eStart = startEntry + 1;
+        }
+        for (long long e = eStart; e < cell->size; e++) {
+          long long i = cell->entries[e];
+          if (g_spatialSubtreeMask && !(g_frozenTagMasks[i] & g_spatialSubtreeMask)) continue;
+          if (!(g_frozenCompMasks[i] & (1LL << g_spatialComp))) continue;
+          double* px = (double*)g_frozenFields[g_spatialComp * KX_MAX_FIELDS + g_spatialFieldX];
+          double* py = (double*)g_frozenFields[g_spatialComp * KX_MAX_FIELDS + g_spatialFieldY];
+          double* pz = (double*)g_frozenFields[g_spatialComp * KX_MAX_FIELDS + g_spatialFieldZ];
+          double dx = px[i] - cx, dy = py[i] - cy, dz = (g_spatialDims >= 3 ? pz[i] : 0) - cz;
+          if (dx*dx + dy*dy + dz*dz <= r2) {
+            long long packed = (cellIdx << 32) | (long long)e;
+            return packed;
+          }
+        }
+      }
+    }
+  }
+  return -1;
+}
+
+long long kx_spatial_query_count(double cx, double cy, double cz, double radius) {
+  long long count = 0;
+  long long h = kx_spatial_query_begin(cx, cy, cz, radius);
+  while (h >= 0) {
+    count++;
+    h = kx_spatial_query_next(h, cx, cy, cz, radius);
+  }
+  return count;
 }
 
 static void growGlobalFrozen(long long minSlots) {
@@ -971,6 +1275,8 @@ static void growGlobalFrozen(long long minSlots) {
   }
   long long cap = g_boxCount * KX_INIT_ENTITIES;
   while (cap < minSlots) cap *= 2;
+  if (cap <= g_frozenCap) return;
+  g_frozenCap = cap;
   for (int c = 0; c < g_compCount; c++) {
     for (int f = 0; f < g_fieldCounts[c]; f++) {
       g_frozenFields[c * KX_MAX_FIELDS + f] =
@@ -992,16 +1298,56 @@ static int frozenMatch(long long fs, long long subtreeMask, int exact) {
 }
 
 long long kx_others_begin(long long subtreeMask, int exact) {
-  for (long long i = 0; i < g_frozenSize; i++) {
-    if (frozenMatch(i, subtreeMask, exact)) return i;
+  if (subtreeMask == 0 || !g_tagIdxBuilt) {
+    for (long long i = 0; i < g_frozenSize; i++) {
+      if (frozenMatch(i, subtreeMask, exact)) return i;
+    }
+    return -1;
+  }
+  if (exact) {
+    long long bit = subtreeMask & -subtreeMask;
+    int bitIdx = __builtin_ctzll(bit);
+    for (long long k = 0; k < g_tagIdxSize[bitIdx]; k++) {
+      long long i = g_tagIdx[bitIdx][k];
+      if ((g_frozenTagMasks[i] & subtreeMask) == bit) return i;
+    }
+    return -1;
+  }
+  for (int bit = 0; bit < KX_MAX_TAGS; bit++) {
+    if (!(subtreeMask & (1LL << bit))) continue;
+    for (long long k = 0; k < g_tagIdxSize[bit]; k++) {
+      long long i = g_tagIdx[bit][k];
+      if ((g_frozenTagMasks[i] & subtreeMask) != 0) return i;
+    }
   }
   return -1;
 }
 
 long long kx_others_next(long long h, long long subtreeMask, int exact) {
   if (h < 0) return -1;
-  for (long long i = h + 1; i < g_frozenSize; i++) {
-    if (frozenMatch(i, subtreeMask, exact)) return i;
+  if (subtreeMask == 0 || !g_tagIdxBuilt) {
+    for (long long i = h + 1; i < g_frozenSize; i++) {
+      if (frozenMatch(i, subtreeMask, exact)) return i;
+    }
+    return -1;
+  }
+  if (exact) {
+    long long bit = subtreeMask & -subtreeMask;
+    int bitIdx = __builtin_ctzll(bit);
+    for (long long k = 0; k < g_tagIdxSize[bitIdx]; k++) {
+      long long i = g_tagIdx[bitIdx][k];
+      if (i <= h) continue;
+      if ((g_frozenTagMasks[i] & subtreeMask) == bit) return i;
+    }
+    return -1;
+  }
+  for (int bit = 0; bit < KX_MAX_TAGS; bit++) {
+    if (!(subtreeMask & (1LL << bit))) continue;
+    for (long long k = 0; k < g_tagIdxSize[bit]; k++) {
+      long long i = g_tagIdx[bit][k];
+      if (i <= h) continue;
+      if ((g_frozenTagMasks[i] & subtreeMask) != 0) return i;
+    }
   }
   return -1;
 }
@@ -1107,7 +1453,11 @@ static void rebalance(void) {
   }
 }
 
-void kx_stop(void) { g_stop = 1; }
+void kx_stop(void) {
+  g_stop = 1;
+  freeTagIdx();
+  spatialFreeGrid();
+}
 
 double kx_get_dt(void) { return g_dt; }
 
@@ -1210,6 +1560,7 @@ void kx_run(int tps, long long maxTicks, double cores) {
     for (;;) {
       if (g_stop) break;
       if (g_maxTicks >= 0 && g_tick >= g_maxTicks) break;
+      g_traceEnabled = getenv("KX_TRACE") != NULL;
       kx_poll_stdin();
       pthread_barrier_wait(&startBarrier);
       pthread_barrier_wait(&simBarrier);
@@ -1254,6 +1605,7 @@ void kx_run(int tps, long long maxTicks, double cores) {
     for (;;) {
       if (g_stop) break;
       if (g_maxTicks >= 0 && g_tick >= g_maxTicks) break;
+      g_traceEnabled = getenv("KX_TRACE") != NULL;
       kx_poll_stdin();
       for (int s = 0; s < g_sysCount; s++) {
         if (g_sysMatch[s] == 0 && g_sysWithout[s] == 0) g_sysBodies[s](0);
@@ -1348,7 +1700,7 @@ char* kx_str_substr(const char* s, long long start, long long len) {
   if (!s || start < 0 || len < 0) return kx_dup("");
   long long n = (long long)strlen(s);
   if (start > n) return kx_dup("");
-  if (start + len > n) len = n - start;
+  if (len > n - start) len = n - start;
   char* p = (char*)malloc((size_t)len + 1);
   if (p) {
     memcpy(p, s + start, (size_t)len);
@@ -1507,4 +1859,48 @@ char* kx_poll_line(void) {
   g_stdinHead = (g_stdinHead + 1) % KX_STDIN_Q;
   g_stdinCount--;
   return line;
+}
+char* kx_int_str(long long v) {
+  char buf[32];
+  int neg = 0;
+  unsigned long long uv;
+  if (v < 0) { neg = 1; uv = (unsigned long long)(-v); }
+  else { uv = (unsigned long long)v; }
+  if (uv == 0) { buf[0] = '0'; buf[1] = '\0'; }
+  else {
+    int i = 0;
+    while (uv > 0) { buf[i++] = '0' + (int)(uv % 10); uv /= 10; }
+    if (neg) buf[i++] = '-';
+    buf[i] = '\0';
+    for (int j = 0; j < i / 2; j++) { char t = buf[j]; buf[j] = buf[i-1-j]; buf[i-1-j] = t; }
+  }
+  return kx_dup(buf);
+}
+
+long long kx_struct_new(int fieldCount) {
+  long long h = (long long)(uintptr_t)malloc((size_t)fieldCount * sizeof(long long));
+  memset((void*)h, 0, (size_t)fieldCount * sizeof(long long));
+  return h;
+}
+
+long long kx_struct_get(long long h, int field) {
+  long long* p = (long long*)h;
+  return p[field];
+}
+
+void kx_struct_set(long long h, int field, long long val) {
+  long long* p = (long long*)h;
+  p[field] = val;
+}
+
+int kx_str_le(const char* a, const char* b) {
+  if (!a) a = "";
+  if (!b) b = "";
+  return strcmp(a, b) <= 0;
+}
+
+int kx_str_ge(const char* a, const char* b) {
+  if (!a) a = "";
+  if (!b) b = "";
+  return strcmp(a, b) >= 0;
 }

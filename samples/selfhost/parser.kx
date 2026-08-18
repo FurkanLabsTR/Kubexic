@@ -1,0 +1,1707 @@
+// parser.kx — the Kubexic recursive-descent parser, written in Kubexic.
+// Produces an arena-indexed AST and dumps it in the exact format of
+// 'kxc dump' so the two implementations can be diffed byte-for-byte.
+
+struct Token {
+    var kind = "";
+    var text = "";
+    var line = 0;
+    var col = 0;
+}
+
+struct AstNode {
+    var kind = "";
+    var value = "";
+    var line = 0;
+    var col = 0;
+    var children = List<int>();
+}
+
+var IsDigit(c) {
+    return c >= "0" && c <= "9";
+}
+
+var IsLetter(c) {
+    return (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
+}
+
+var IsIdentPart(c) {
+    return IsLetter(c) || IsDigit(c) || c == "_";
+}
+
+var IsSpace(c) {
+    return c == " " || c == "\t" || c == "\n" || c == "\r";
+}
+
+var CharAt(s, i) {
+    if (i < 0 || i >= s.Length) {
+        return "";
+    }
+    return s.Substring(i, 1);
+}
+
+var LexAll(src) {
+    var tokens = List<Token>();
+    var pos = 0;
+    var line = 1;
+    var col = 1;
+    var n = src.Length;
+    while (pos < n) {
+        var c = CharAt(src, pos);
+        if (IsSpace(c)) {
+            pos++;
+            col++;
+            if (c == "\n") {
+                line++;
+                col = 1;
+            }
+            continue;
+        }
+        if (c == "/" && CharAt(src, pos + 1) == "/") {
+            while (pos < n && CharAt(src, pos) != "\n") {
+                pos++;
+                col++;
+            }
+            continue;
+        }
+        if (c == "/" && CharAt(src, pos + 1) == "*") {
+            pos += 2;
+            col += 2;
+            while (pos < n && !(CharAt(src, pos) == "*" && CharAt(src, pos + 1) == "/")) {
+                if (CharAt(src, pos) == "\n") {
+                    line++;
+                    col = 1;
+                } else {
+                    col++;
+                }
+                pos++;
+            }
+            pos += 2;
+            col += 2;
+            continue;
+        }
+        if (IsLetter(c) || c == "_") {
+            var start = pos;
+            var startCol = col;
+            var startLine = line;
+            while (pos < n && IsIdentPart(CharAt(src, pos))) {
+                pos++;
+                col++;
+            }
+            var text = src.Substring(start, pos - start);
+            var kind = "id";
+            if (text == "component" || text == "system" || text == "tag" ||
+                text == "struct" || text == "enum" || text == "const" ||
+                text == "var" || text == "void" || text == "int" ||
+                text == "long" || text == "float" || text == "double" ||
+                text == "bool" || text == "byte" || text == "string" ||
+                text == "if" || text == "else" || text == "while" ||
+                text == "for" || text == "foreach" || text == "in" ||
+                text == "break" || text == "continue" || text == "return" ||
+                text == "spawn" || text == "despawn" || text == "attach" ||
+                text == "detach" || text == "self" || text == "with" ||
+                text == "without" || text == "new" || text == "tags" ||
+                text == "using" || text == "true" || text == "false" ||
+                text == "is" || text == "exact" || text == "panic" ||
+                text == "switch" || text == "case" || text == "default" ||
+                text == "extern") {
+                kind = "kw";
+            }
+            tokens.Add(Token { kind = kind, text = text, line = startLine, col = startCol });
+            continue;
+        }
+        if (IsDigit(c)) {
+            var start = pos;
+            var startCol = col;
+            var startLine = line;
+            var isFloat = false;
+            while (pos < n && IsDigit(CharAt(src, pos))) {
+                pos++;
+                col++;
+            }
+            if (CharAt(src, pos) == "." && IsDigit(CharAt(src, pos + 1))) {
+                isFloat = true;
+                pos++;
+                col++;
+                while (pos < n && IsDigit(CharAt(src, pos))) {
+                    pos++;
+                    col++;
+                }
+            }
+            var text = src.Substring(start, pos - start);
+            tokens.Add(Token { kind = isFloat ? "float" : "int", text = text,
+                               line = startLine, col = startCol });
+            continue;
+        }
+        if (c == "$" && CharAt(src, pos + 1) == "\"") {
+            var startCol = col;
+            var startLine = line;
+            pos += 2;
+            col += 2;
+            var text = "";
+            var depth = 0;
+            while (pos < n) {
+                var dc = CharAt(src, pos);
+                if (dc == "{") {
+                    depth++;
+                    text += dc;
+                    pos++;
+                    col++;
+                    continue;
+                }
+                if (dc == "}") {
+                    if (depth > 0) {
+                        depth--;
+                    }
+                    text += dc;
+                    pos++;
+                    col++;
+                    continue;
+                }
+                if (dc == "\"" && depth == 0) {
+                    break;
+                }
+                if (dc == "\"" && depth > 0) {
+                    text += dc;
+                    pos++;
+                    col++;
+                    while (pos < n) {
+                        var q = CharAt(src, pos);
+                        text += q;
+                        pos++;
+                        col++;
+                        if (q == "\\" && pos < n) {
+                            text += CharAt(src, pos);
+                            pos++;
+                            col++;
+                            continue;
+                        }
+                        if (q == "\"") {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                text += dc;
+                pos++;
+                col++;
+            }
+            pos++;
+            col++;
+            tokens.Add(Token { kind = "dstr", text = text, line = startLine, col = startCol });
+            continue;
+        }
+        if (c == "\"") {
+            var startCol = col;
+            var startLine = line;
+            pos++;
+            col++;
+            var text = "";
+            while (pos < n && CharAt(src, pos) != "\"") {
+                if (CharAt(src, pos) == "\\" && pos + 1 < n) {
+                    var esc = CharAt(src, pos + 1);
+                    if (esc == "n") {
+                        text += "\n";
+                    } else if (esc == "t") {
+                        text += "\t";
+                    } else if (esc == "r") {
+                        text += "\r";
+                    } else if (esc == "\\") {
+                        text += "\\";
+                    } else if (esc == "\"") {
+                        text += "\"";
+                    } else if (esc == "'") {
+                        text += "'";
+                    } else {
+                        text += "\\";
+                        text += esc;
+                    }
+                    pos += 2;
+                    col += 2;
+                } else {
+                    text += CharAt(src, pos);
+                    pos++;
+                    col++;
+                }
+            }
+            pos++;
+            col++;
+            tokens.Add(Token { kind = "string", text = text, line = startLine, col = startCol });
+            continue;
+        }
+        var two = src.Substring(pos, 2);
+        if (two == "==" || two == "!=" || two == "<=" || two == ">=" ||
+            two == "&&" || two == "||" || two == "+=" || two == "-=" ||
+            two == "*=" || two == "/=" || two == "%=" || two == "++" ||
+            two == "--") {
+            tokens.Add(Token { kind = "op", text = two, line = line, col = col });
+            pos += 2;
+            col += 2;
+            continue;
+        }
+        tokens.Add(Token { kind = "punct", text = c, line = line, col = col });
+        pos++;
+        col++;
+    }
+    tokens.Add(Token { kind = "eof", text = "", line = line, col = col });
+    return tokens;
+}
+
+/* ---------------- arena helpers ---------------- */
+
+var NewNode(arena, kind, value, line, col) {
+    arena.Add(AstNode { kind = kind, value = value, line = line, col = col,
+                        children = List<int>() });
+    return arena.Count - 1;
+}
+
+var Node(arena, i) {
+    return arena.Get(i);
+}
+
+var TrimFloat(s) {
+    var out = s;
+    while (out.Length > 0 && out.EndsWith("0")) {
+        out = out.Substring(0, out.Length - 1);
+    }
+    if (out.Length > 0 && out.EndsWith(".")) {
+        out = out.Substring(0, out.Length - 1);
+    }
+    if (out == "-") {
+        out = "-0";
+    }
+    if (out == "") {
+        out = "0";
+    }
+    return out;
+}
+
+void AddChild(arena, parent, child) {
+    var children = arena.Get(parent).children;
+    children.Add(child);
+}
+
+/* ---------------- cursor helpers ---------------- */
+
+var Peek(tokens, pos) {
+    return tokens.Get(pos.Get(0));
+}
+
+var CurKind(tokens, pos) {
+    return Peek(tokens, pos).kind;
+}
+
+var CurText(tokens, pos) {
+    return Peek(tokens, pos).text;
+}
+
+var CurLine(tokens, pos) {
+    return Peek(tokens, pos).line;
+}
+
+var CurCol(tokens, pos) {
+    return Peek(tokens, pos).col;
+}
+
+var AtEnd(tokens, pos) {
+    return CurKind(tokens, pos) == "eof";
+}
+
+void Advance(tokens, pos) {
+    pos.Set(0, pos.Get(0) + 1);
+}
+
+var IsKw(tokens, pos, w) {
+    var t = Peek(tokens, pos);
+    return t.kind == "kw" && t.text == w;
+}
+
+var IsPunct(tokens, pos, p) {
+    var t = Peek(tokens, pos);
+    return t.kind == "punct" && t.text == p;
+}
+
+var IsOp(tokens, pos, o) {
+    var t = Peek(tokens, pos);
+    return t.kind == "op" && t.text == o;
+}
+
+var IsNameTok(tokens, pos) {
+    var t = Peek(tokens, pos);
+    return t.kind == "id" || t.kind == "kw";
+}
+
+var MatchKw(tokens, pos, w) {
+    if (IsKw(tokens, pos, w)) {
+        Advance(tokens, pos);
+        return true;
+    }
+    return false;
+}
+
+var MatchPunct(tokens, pos, p) {
+    if (IsPunct(tokens, pos, p)) {
+        Advance(tokens, pos);
+        return true;
+    }
+    return false;
+}
+
+var MatchOp(tokens, pos, o) {
+    if (IsOp(tokens, pos, o)) {
+        Advance(tokens, pos);
+        return true;
+    }
+    return false;
+}
+
+var ExpectPunct(tokens, pos, p, errors, what) {
+    if (!MatchPunct(tokens, pos, p)) {
+        errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: expected {what}");
+        return false;
+    }
+    return true;
+}
+
+var ExpectName(tokens, pos, errors, what) {
+    if (IsNameTok(tokens, pos)) {
+        Advance(tokens, pos);
+        return true;
+    }
+    errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: expected {what}");
+    return false;
+}
+
+var PrevText(tokens, pos) {
+    return tokens.Get(pos.Get(0) - 1).text;
+}
+
+/* ---------------- expression parsing ---------------- */
+
+var ParsePrimary(tokens, pos, arena, errors) {
+    var t = Peek(tokens, pos);
+    var loc = NewNode(arena, "loc", "", t.line, t.col);
+    if (t.kind == "int") {
+        Advance(tokens, pos);
+        return NewNode(arena, "int", t.text, t.line, t.col);
+    }
+    if (t.kind == "float") {
+        Advance(tokens, pos);
+        return NewNode(arena, "float", t.text, t.line, t.col);
+    }
+    if (t.kind == "string") {
+        Advance(tokens, pos);
+        return NewNode(arena, "string", t.text, t.line, t.col);
+    }
+    if (t.kind == "dstr") {
+        Advance(tokens, pos);
+        return ParseInterpolated(arena, t.text, t.line, t.col);
+    }
+    if (t.kind == "kw" && t.text == "true") {
+        Advance(tokens, pos);
+        return NewNode(arena, "bool", "true", t.line, t.col);
+    }
+    if (t.kind == "kw" && t.text == "false") {
+        Advance(tokens, pos);
+        return NewNode(arena, "bool", "false", t.line, t.col);
+    }
+    if (t.kind == "kw" && t.text == "self") {
+        Advance(tokens, pos);
+        return NewNode(arena, "identifier", "self", t.line, t.col);
+    }
+    if (t.kind == "kw" && t.text == "spawn") {
+        Advance(tokens, pos);
+        return ParseSpawn(tokens, pos, arena, errors);
+    }
+    if (t.kind == "id") {
+        Advance(tokens, pos);
+        if (IsPunct(tokens, pos, "{")) {
+            Advance(tokens, pos);
+            var node = NewNode(arena, "structinit", t.text, t.line, t.col);
+            while (!IsPunct(tokens, pos, "}") && !AtEnd(tokens, pos)) {
+                if (!IsNameTok(tokens, pos)) {
+                    break;
+                }
+                var fname = CurText(tokens, pos);
+                Advance(tokens, pos);
+                if (!ExpectPunct(tokens, pos, "=", errors, "'=' in component initializer")) {
+                    break;
+                }
+                var initNode = NewNode(arena, "field", fname, t.line, t.col);
+                AddChild(arena, initNode, ParseExpression(tokens, pos, arena, errors));
+                AddChild(arena, node, initNode);
+                if (!MatchPunct(tokens, pos, ",")) {
+                    break;
+                }
+            }
+            ExpectPunct(tokens, pos, "}", errors, "'}' to close component initializer");
+            return node;
+        }
+        if (IsPunct(tokens, pos, "(")) {
+            return ParseCall(tokens, pos, arena, errors, NewNode(arena, "identifier",
+                                                                 t.text, t.line, t.col), List<string>());
+        }
+        return NewNode(arena, "identifier", t.text, t.line, t.col);
+    }
+    if (IsPunct(tokens, pos, "(")) {
+        Advance(tokens, pos);
+        var inner = ParseExpression(tokens, pos, arena, errors);
+        ExpectPunct(tokens, pos, ")", errors, "')'");
+        return inner;
+    }
+    errors.Add($"{t.line}:{t.col}: expected an expression");
+    Advance(tokens, pos);
+    return NewNode(arena, "int", "0", t.line, t.col);
+}
+
+var ParseCall(tokens, pos, arena, errors, callee, typeArgs) {
+    var node = NewNode(arena, "call", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    AddChild(arena, node, callee);
+    foreach (var ta in typeArgs) {
+        var taNode = NewNode(arena, "typearg", ta, 0, 0);
+        AddChild(arena, node, taNode);
+    }
+    if (!ExpectPunct(tokens, pos, "(", errors, "'('")) {
+        return node;
+    }
+    while (!IsPunct(tokens, pos, ")") && !AtEnd(tokens, pos)) {
+        var argNode = NewNode(arena, "arg", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        if (IsNameTok(tokens, pos)) {
+            var maybeName = Peek(tokens, pos);
+            var next = tokens.Get(pos.Get(0) + 1);
+            if (next.kind == "punct" && next.text == ":") {
+                Advance(tokens, pos);
+                Advance(tokens, pos);
+                var nameNode = NewNode(arena, "argname", maybeName.text, maybeName.line,
+                                       maybeName.col);
+                AddChild(arena, argNode, nameNode);
+            }
+        }
+        AddChild(arena, argNode, ParseExpression(tokens, pos, arena, errors));
+        AddChild(arena, node, argNode);
+        if (!MatchPunct(tokens, pos, ",")) {
+            break;
+        }
+    }
+    ExpectPunct(tokens, pos, ")", errors, "')'");
+    return node;
+}
+
+var ParseTypeArgs(tokens, pos) {
+    var out = List<string>();
+    if (!IsPunct(tokens, pos, "<")) {
+        return out;
+    }
+    var save = pos.Get(0);
+    Advance(tokens, pos);
+    while (IsNameTok(tokens, pos) && !IsPunct(tokens, pos, ">")) {
+        out.Add(CurText(tokens, pos));
+        Advance(tokens, pos);
+        if (!MatchPunct(tokens, pos, ",")) {
+            break;
+        }
+    }
+    if (!MatchPunct(tokens, pos, ">")) {
+        pos.Set(0, save);
+        return List<string>();
+    }
+    return out;
+}
+
+var ParsePostfix(tokens, pos, arena, errors) {
+    var e = ParsePrimary(tokens, pos, arena, errors);
+    for (;;) {
+        if (MatchPunct(tokens, pos, ".")) {
+            if (!IsNameTok(tokens, pos)) {
+                errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: expected member name after '.'");
+                return e;
+            }
+            var m = NewNode(arena, "member", CurText(tokens, pos), CurLine(tokens, pos),
+                            CurCol(tokens, pos));
+            Advance(tokens, pos);
+            AddChild(arena, m, e);
+            e = m;
+            continue;
+        }
+        if (IsPunct(tokens, pos, "<")) {
+            var savePos = pos.Get(0);
+            var typeArgs = ParseTypeArgs(tokens, pos);
+            if (typeArgs.Count > 0 && IsPunct(tokens, pos, "(")) {
+                e = ParseCall(tokens, pos, arena, errors, e, typeArgs);
+                continue;
+            }
+            pos.Set(0, savePos);
+            return e;
+        }
+        if (IsPunct(tokens, pos, "(")) {
+            e = ParseCall(tokens, pos, arena, errors, e, List<string>());
+            continue;
+        }
+        if (IsKw(tokens, pos, "is")) {
+            Advance(tokens, pos);
+            var isNode = NewNode(arena, "is", "", CurLine(tokens, pos), CurCol(tokens, pos));
+            AddChild(arena, isNode, e);
+            if (IsNameTok(tokens, pos)) {
+                var typeNode = NewNode(arena, "istype", CurText(tokens, pos),
+                                       CurLine(tokens, pos), CurCol(tokens, pos));
+                Advance(tokens, pos);
+                AddChild(arena, isNode, typeNode);
+            }
+            if (IsNameTok(tokens, pos)) {
+                var varNode = NewNode(arena, "isvar", CurText(tokens, pos),
+                                      CurLine(tokens, pos), CurCol(tokens, pos));
+                Advance(tokens, pos);
+                AddChild(arena, isNode, varNode);
+            }
+            e = isNode;
+            continue;
+        }
+        if (IsOp(tokens, pos, "++") || IsOp(tokens, pos, "--")) {
+            var uOp = CurText(tokens, pos);
+            Advance(tokens, pos);
+            var u = NewNode(arena, "unary", uOp == "++" ? "postinc" : "postdec",
+                            CurLine(tokens, pos), CurCol(tokens, pos));
+            AddChild(arena, u, e);
+            e = u;
+            continue;
+        }
+        return e;
+    }
+}
+
+var ParseBinaryFrom(e, tokens, pos, arena, errors, opText) {
+    Advance(tokens, pos);
+    var node = NewNode(arena, "binary", opText, CurLine(tokens, pos), CurCol(tokens, pos));
+    AddChild(arena, node, e);
+    AddChild(arena, node, ParseUnary(tokens, pos, arena, errors));
+    return node;
+}
+
+var ParseUnary(tokens, pos, arena, errors) {
+    if (IsKw(tokens, pos, "exact")) {
+        Advance(tokens, pos);
+        var u = NewNode(arena, "unary", "exact", CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, u, ParseUnary(tokens, pos, arena, errors));
+        return u;
+    }
+    if (IsPunct(tokens, pos, "!")) {
+        Advance(tokens, pos);
+        var u = NewNode(arena, "unary", "not", CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, u, ParseUnary(tokens, pos, arena, errors));
+        return u;
+    }
+    if (IsPunct(tokens, pos, "-")) {
+        Advance(tokens, pos);
+        var u = NewNode(arena, "unary", "neg", CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, u, ParseUnary(tokens, pos, arena, errors));
+        return u;
+    }
+    return ParsePostfix(tokens, pos, arena, errors);
+}
+
+var ParseMultiplicative(tokens, pos, arena, errors) {
+    var lhs = ParseUnary(tokens, pos, arena, errors);
+    for (;;) {
+        var op = "";
+        if (IsPunct(tokens, pos, "*")) {
+            op = "mul";
+        } else if (IsPunct(tokens, pos, "/")) {
+            op = "div";
+        } else if (IsPunct(tokens, pos, "%")) {
+            op = "mod";
+        } else {
+            return lhs;
+        }
+        Advance(tokens, pos);
+        var node = NewNode(arena, "binary", op, CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, node, lhs);
+        AddChild(arena, node, ParseUnary(tokens, pos, arena, errors));
+        lhs = node;
+    }
+}
+
+var ParseAdditive(tokens, pos, arena, errors) {
+    var lhs = ParseMultiplicative(tokens, pos, arena, errors);
+    for (;;) {
+        var op = "";
+        if (IsPunct(tokens, pos, "+")) {
+            op = "add";
+        } else if (IsPunct(tokens, pos, "-")) {
+            op = "sub";
+        } else {
+            return lhs;
+        }
+        Advance(tokens, pos);
+        var node = NewNode(arena, "binary", op, CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, node, lhs);
+        AddChild(arena, node, ParseMultiplicative(tokens, pos, arena, errors));
+        lhs = node;
+    }
+}
+
+var ParseRelational(tokens, pos, arena, errors) {
+    var lhs = ParseAdditive(tokens, pos, arena, errors);
+    for (;;) {
+        var op = "";
+        if (IsPunct(tokens, pos, "<")) {
+            op = "lt";
+        } else if (IsPunct(tokens, pos, ">")) {
+            op = "gt";
+        } else if (IsOp(tokens, pos, "<=")) {
+            op = "le";
+        } else if (IsOp(tokens, pos, ">=")) {
+            op = "ge";
+        } else {
+            return lhs;
+        }
+        Advance(tokens, pos);
+        var node = NewNode(arena, "binary", op, CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, node, lhs);
+        AddChild(arena, node, ParseAdditive(tokens, pos, arena, errors));
+        lhs = node;
+    }
+}
+
+var ParseEquality(tokens, pos, arena, errors) {
+    var lhs = ParseRelational(tokens, pos, arena, errors);
+    for (;;) {
+        var op = "";
+        if (IsOp(tokens, pos, "==")) {
+            op = "eq";
+        } else if (IsOp(tokens, pos, "!=")) {
+            op = "ne";
+        } else {
+            return lhs;
+        }
+        Advance(tokens, pos);
+        var node = NewNode(arena, "binary", op, CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, node, lhs);
+        AddChild(arena, node, ParseRelational(tokens, pos, arena, errors));
+        lhs = node;
+    }
+}
+
+var ParseLogicalAnd(tokens, pos, arena, errors) {
+    var lhs = ParseEquality(tokens, pos, arena, errors);
+    for (;;) {
+        if (!IsOp(tokens, pos, "&&")) {
+            return lhs;
+        }
+        Advance(tokens, pos);
+        var node = NewNode(arena, "binary", "and", CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, node, lhs);
+        AddChild(arena, node, ParseEquality(tokens, pos, arena, errors));
+        lhs = node;
+    }
+}
+
+var ParseLogicalOr(tokens, pos, arena, errors) {
+    var lhs = ParseLogicalAnd(tokens, pos, arena, errors);
+    for (;;) {
+        if (!IsOp(tokens, pos, "||")) {
+            return lhs;
+        }
+        Advance(tokens, pos);
+        var node = NewNode(arena, "binary", "or", CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, node, lhs);
+        AddChild(arena, node, ParseLogicalAnd(tokens, pos, arena, errors));
+        lhs = node;
+    }
+}
+
+var ParseTernary(tokens, pos, arena, errors) {
+    var cond = ParseLogicalOr(tokens, pos, arena, errors);
+    if (!IsPunct(tokens, pos, "?")) {
+        return cond;
+    }
+    Advance(tokens, pos);
+    var node = NewNode(arena, "ternary", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    AddChild(arena, node, cond);
+    AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+    ExpectPunct(tokens, pos, ":", errors, "':' in ternary");
+    AddChild(arena, node, ParseTernary(tokens, pos, arena, errors));
+    return node;
+}
+
+var ParseAssignOp(tokens, pos) {
+    if (MatchPunct(tokens, pos, "=")) {
+        return "assign";
+    }
+    if (MatchOp(tokens, pos, "+=")) {
+        return "addassign";
+    }
+    if (MatchOp(tokens, pos, "-=")) {
+        return "subassign";
+    }
+    if (MatchOp(tokens, pos, "*=")) {
+        return "mulassign";
+    }
+    if (MatchOp(tokens, pos, "/=")) {
+        return "divassign";
+    }
+    if (MatchOp(tokens, pos, "%=")) {
+        return "modassign";
+    }
+    return "";
+}
+
+var ParseExpression(tokens, pos, arena, errors) {
+    var lhs = ParseTernary(tokens, pos, arena, errors);
+    var eqLine = CurLine(tokens, pos);
+    var eqCol = CurCol(tokens, pos);
+    var op = ParseAssignOp(tokens, pos);
+    if (op == "") {
+        return lhs;
+    }
+    var node = NewNode(arena, "assign", op, eqLine, eqCol);
+    AddChild(arena, node, lhs);
+    AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+    return node;
+}
+
+/* ---------------- spawn / interpolation ---------------- */
+
+var ParseSpawn(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "spawn", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    if (!ExpectPunct(tokens, pos, "{", errors, "'{' after spawn")) {
+        return node;
+    }
+    while (!IsPunct(tokens, pos, "}") && !AtEnd(tokens, pos)) {
+        if (IsKw(tokens, pos, "tags")) {
+            Advance(tokens, pos);
+            if (ExpectPunct(tokens, pos, "[", errors, "'[' after tags")) {
+                while (IsNameTok(tokens, pos) && !IsPunct(tokens, pos, "]")) {
+                    var tn = NewNode(arena, "spawntag", CurText(tokens, pos),
+                                     CurLine(tokens, pos), CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, node, tn);
+                    if (!MatchPunct(tokens, pos, ",")) {
+                        break;
+                    }
+                }
+                ExpectPunct(tokens, pos, "]", errors, "']' to close tags");
+            }
+        } else {
+            var ci = ParseComponentInit(tokens, pos, arena, errors);
+            AddChild(arena, node, ci);
+        }
+        if (!MatchPunct(tokens, pos, ",")) {
+            break;
+        }
+    }
+    ExpectPunct(tokens, pos, "}", errors, "'}' to close spawn");
+    return node;
+}
+
+var ParseComponentInit(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "compinit", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    if (IsNameTok(tokens, pos)) {
+        var tn = NewNode(arena, "compname", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, tn);
+    }
+    if (ExpectPunct(tokens, pos, "{", errors, "'{' after component type")) {
+        while (!IsPunct(tokens, pos, "}") && !AtEnd(tokens, pos)) {
+            if (!IsNameTok(tokens, pos)) {
+                break;
+            }
+            var fname = CurText(tokens, pos);
+            Advance(tokens, pos);
+            if (!ExpectPunct(tokens, pos, "=", errors, "'=' in component initializer")) {
+                break;
+            }
+            var initNode = NewNode(arena, "field", fname, CurLine(tokens, pos),
+                                   CurCol(tokens, pos));
+            AddChild(arena, initNode, ParseExpression(tokens, pos, arena, errors));
+            AddChild(arena, node, initNode);
+            if (!MatchPunct(tokens, pos, ",")) {
+                break;
+            }
+        }
+        ExpectPunct(tokens, pos, "}", errors, "'}' to close component initializer");
+    }
+    return node;
+}
+
+var ParseInterpolated(arena, content, line, col) {
+    var node = NewNode(arena, "interpolated", "", line, col);
+    var lit = "";
+    var i = 0;
+    var n = content.Length;
+    while (i < n) {
+        var c = CharAt(content, i);
+        if (c == "{") {
+            var ln = NewNode(arena, "lit", lit, line, col);
+            AddChild(arena, node, ln);
+            lit = "";
+            var depth = 1;
+            var j = i + 1;
+            var inner = "";
+            while (j < n && depth > 0) {
+                var d = CharAt(content, j);
+                if (d == "{") {
+                    depth++;
+                } else if (d == "}") {
+                    depth--;
+                }
+                if (depth > 0) {
+                    inner += d;
+                }
+                j++;
+            }
+            var sub = LexAll(inner);
+            var sp = List<int>();
+            sp.Add(0);
+            var expr = ParseExpression(sub, sp, arena, List<string>());
+            var en = NewNode(arena, "interpexpr", "", line, col);
+            AddChild(arena, en, expr);
+            AddChild(arena, node, en);
+            i = j;
+        } else {
+            lit += c;
+            i++;
+        }
+    }
+    var ln = NewNode(arena, "lit", lit, line, col);
+    AddChild(arena, node, ln);
+    return node;
+}
+
+/* ---------------- statements ---------------- */
+
+var ParseBlock(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "block", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    if (!ExpectPunct(tokens, pos, "{", errors, "'{' to start block")) {
+        return node;
+    }
+    while (!IsPunct(tokens, pos, "}") && !AtEnd(tokens, pos)) {
+        AddChild(arena, node, ParseStatement(tokens, pos, arena, errors));
+    }
+    ExpectPunct(tokens, pos, "}", errors, "'}' to close block");
+    return node;
+}
+
+var ParseStatement(tokens, pos, arena, errors) {
+    if (IsPunct(tokens, pos, "{")) {
+        return ParseBlock(tokens, pos, arena, errors);
+    }
+    if (IsKw(tokens, pos, "var")) {
+        var node = NewNode(arena, "vardecl", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (IsNameTok(tokens, pos)) {
+            var vn = NewNode(arena, "varname", CurText(tokens, pos), CurLine(tokens, pos),
+                             CurCol(tokens, pos));
+            Advance(tokens, pos);
+            AddChild(arena, node, vn);
+        }
+        if (ExpectPunct(tokens, pos, "=", errors, "'=' in variable declaration")) {
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+        }
+        ExpectPunct(tokens, pos, ";", errors, "';' after variable declaration");
+        return node;
+    }
+    if (IsKw(tokens, pos, "if")) {
+        var node = NewNode(arena, "if", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (ExpectPunct(tokens, pos, "(", errors, "'(' after if")) {
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+            ExpectPunct(tokens, pos, ")", errors, "')' after if condition");
+        }
+        AddChild(arena, node, ParseStatement(tokens, pos, arena, errors));
+        if (MatchKw(tokens, pos, "else")) {
+            AddChild(arena, node, ParseStatement(tokens, pos, arena, errors));
+        }
+        return node;
+    }
+    if (IsKw(tokens, pos, "while")) {
+        var node = NewNode(arena, "while", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (ExpectPunct(tokens, pos, "(", errors, "'(' after while")) {
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+            ExpectPunct(tokens, pos, ")", errors, "')' after while condition");
+        }
+        AddChild(arena, node, ParseStatement(tokens, pos, arena, errors));
+        return node;
+    }
+    if (IsKw(tokens, pos, "for")) {
+        var node = NewNode(arena, "for", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (!ExpectPunct(tokens, pos, "(", errors, "'(' after for")) {
+            return node;
+        }
+        if (!IsPunct(tokens, pos, ";")) {
+            if (IsKw(tokens, pos, "var")) {
+                var init = NewNode(arena, "vardecl", "", CurLine(tokens, pos),
+                                   CurCol(tokens, pos));
+                Advance(tokens, pos);
+                if (IsNameTok(tokens, pos)) {
+                    var vn = NewNode(arena, "varname", CurText(tokens, pos),
+                                     CurLine(tokens, pos), CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, init, vn);
+                }
+                if (ExpectPunct(tokens, pos, "=", errors, "'=' in variable declaration")) {
+                    AddChild(arena, init, ParseExpression(tokens, pos, arena, errors));
+                }
+                AddChild(arena, node, init);
+            } else {
+                AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+            }
+        }
+        ExpectPunct(tokens, pos, ";", errors, "';' after for init");
+        if (!IsPunct(tokens, pos, ";")) {
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+        }
+        ExpectPunct(tokens, pos, ";", errors, "';' after for condition");
+        if (!IsPunct(tokens, pos, ")")) {
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+        }
+        ExpectPunct(tokens, pos, ")", errors, "')' after for clauses");
+        AddChild(arena, node, ParseStatement(tokens, pos, arena, errors));
+        return node;
+    }
+    if (IsKw(tokens, pos, "foreach")) {
+        var node = NewNode(arena, "foreach", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (ExpectPunct(tokens, pos, "(", errors, "'(' after foreach")) {
+            MatchKw(tokens, pos, "var");
+            if (IsNameTok(tokens, pos)) {
+                var vn = NewNode(arena, "varname", CurText(tokens, pos), CurLine(tokens, pos),
+                                 CurCol(tokens, pos));
+                Advance(tokens, pos);
+                AddChild(arena, node, vn);
+            }
+            if (!MatchKw(tokens, pos, "in")) {
+                errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: expected 'in' in foreach");
+                return node;
+            }
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+            ExpectPunct(tokens, pos, ")", errors, "')' after foreach container");
+        }
+        AddChild(arena, node, ParseStatement(tokens, pos, arena, errors));
+        return node;
+    }
+    if (IsKw(tokens, pos, "return")) {
+        var node = NewNode(arena, "return", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (!IsPunct(tokens, pos, ";")) {
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+        }
+        ExpectPunct(tokens, pos, ";", errors, "';' after return");
+        return node;
+    }
+    if (IsKw(tokens, pos, "break")) {
+        var node = NewNode(arena, "break", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        ExpectPunct(tokens, pos, ";", errors, "';' after break");
+        return node;
+    }
+    if (IsKw(tokens, pos, "continue")) {
+        var node = NewNode(arena, "continue", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        ExpectPunct(tokens, pos, ";", errors, "';' after continue");
+        return node;
+    }
+    if (IsKw(tokens, pos, "switch")) {
+        var node = NewNode(arena, "switch", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (ExpectPunct(tokens, pos, "(", errors, "'(' after switch")) {
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+            ExpectPunct(tokens, pos, ")", errors, "')' after switch condition");
+        }
+        if (!ExpectPunct(tokens, pos, "{", errors, "'{' to start switch")) {
+            return node;
+        }
+        while (!IsPunct(tokens, pos, "}") && !AtEnd(tokens, pos)) {
+            var caseNode = NewNode(arena, "case", "", CurLine(tokens, pos), CurCol(tokens, pos));
+            if (MatchKw(tokens, pos, "case")) {
+                for (;;) {
+                    AddChild(arena, caseNode, ParseExpression(tokens, pos, arena, errors));
+                    if (!MatchPunct(tokens, pos, ",")) {
+                        break;
+                    }
+                }
+                if (!ExpectPunct(tokens, pos, ":", errors, "':' after case value")) {
+                    return node;
+                }
+            } else if (MatchKw(tokens, pos, "default")) {
+                if (!ExpectPunct(tokens, pos, ":", errors, "':' after default")) {
+                    return node;
+                }
+            } else {
+                errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: expected 'case' or 'default'");
+                return node;
+            }
+            var block = NewNode(arena, "block", "", CurLine(tokens, pos), CurCol(tokens, pos));
+            while (!IsKw(tokens, pos, "case") && !IsKw(tokens, pos, "default") &&
+                   !IsPunct(tokens, pos, "}") && !AtEnd(tokens, pos)) {
+                AddChild(arena, block, ParseStatement(tokens, pos, arena, errors));
+            }
+            AddChild(arena, caseNode, block);
+            AddChild(arena, node, caseNode);
+        }
+        ExpectPunct(tokens, pos, "}", errors, "'}' to close switch");
+        return node;
+    }
+    if (IsKw(tokens, pos, "attach")) {
+        var node = NewNode(arena, "attach", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (!ExpectPunct(tokens, pos, "(", errors, "'(' after attach")) {
+            return node;
+        }
+        AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+        if (ExpectPunct(tokens, pos, ",", errors, "',' between target and component")) {
+            MatchKw(tokens, pos, "new");
+            AddChild(arena, node, ParseComponentInit(tokens, pos, arena, errors));
+        }
+        ExpectPunct(tokens, pos, ")", errors, "')' after attach");
+        ExpectPunct(tokens, pos, ";", errors, "';' after attach");
+        return node;
+    }
+    if (IsKw(tokens, pos, "detach")) {
+        var node = NewNode(arena, "detach", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (!ExpectPunct(tokens, pos, "(", errors, "'(' after detach")) {
+            return node;
+        }
+        AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+        if (ExpectPunct(tokens, pos, ",", errors, "',' between target and component type")) {
+            if (IsNameTok(tokens, pos)) {
+                var tnText = CurText(tokens, pos);
+                var tnLine = CurLine(tokens, pos);
+                var tnCol = CurCol(tokens, pos);
+                if (ExpectName(tokens, pos, errors, "component type name")) {
+                    AddChild(arena, node, NewNode(arena, "typename", tnText, tnLine, tnCol));
+                }
+            }
+        }
+        ExpectPunct(tokens, pos, ")", errors, "')' after detach");
+        ExpectPunct(tokens, pos, ";", errors, "';' after detach");
+        return node;
+    }
+    if (IsKw(tokens, pos, "despawn")) {
+        var node = NewNode(arena, "despawn", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+        ExpectPunct(tokens, pos, ";", errors, "';' after despawn");
+        return node;
+    }
+    var exprNode = NewNode(arena, "expr", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    AddChild(arena, exprNode, ParseExpression(tokens, pos, arena, errors));
+    ExpectPunct(tokens, pos, ";", errors, "';' after expression");
+    return exprNode;
+}
+
+/* ---------------- declarations ---------------- */
+
+var ParseComponentDecl(tokens, pos, arena, errors, kind) {
+    var node = NewNode(arena, kind, "", CurLine(tokens, pos), CurCol(tokens, pos));
+    Advance(tokens, pos);
+    if (IsNameTok(tokens, pos)) {
+        var dn = NewNode(arena, "declname", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, dn);
+    }
+    if (!ExpectPunct(tokens, pos, "{", errors,
+                     kind == "component" ? "'{' after component name" : "'{' after struct name")) {
+        return node;
+    }
+    while (!IsPunct(tokens, pos, "}") && !AtEnd(tokens, pos)) {
+        if (!MatchKw(tokens, pos, "var")) {
+            errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: expected field name");
+            break;
+        }
+        if (IsNameTok(tokens, pos)) {
+            var fn = NewNode(arena, "field", CurText(tokens, pos), CurLine(tokens, pos),
+                             CurCol(tokens, pos));
+            Advance(tokens, pos);
+            if (ExpectPunct(tokens, pos, "=", errors, "'=' in field default")) {
+                AddChild(arena, fn, ParseExpression(tokens, pos, arena, errors));
+            }
+            AddChild(arena, node, fn);
+        }
+        ExpectPunct(tokens, pos, ";", errors, "';' after field");
+    }
+    ExpectPunct(tokens, pos, "}", errors,
+                 kind == "component" ? "'}' to close component" : "'}' to close struct");
+    return node;
+}
+
+var ParseFunctionDecl(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "function", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    var retText = "";
+    var nameText = "";
+    if (IsNameTok(tokens, pos)) {
+        retText = CurText(tokens, pos);
+        Advance(tokens, pos);
+    }
+    if (IsNameTok(tokens, pos)) {
+        nameText = CurText(tokens, pos);
+        Advance(tokens, pos);
+    }
+    if (nameText != "") {
+        AddChild(arena, node, NewNode(arena, "declname", nameText, CurLine(tokens, pos),
+                                      CurCol(tokens, pos)));
+    }
+    if (retText != "") {
+        AddChild(arena, node, NewNode(arena, "ret", retText, CurLine(tokens, pos),
+                                      CurCol(tokens, pos)));
+    }
+    if (!ExpectPunct(tokens, pos, "(", errors, "'(' after function name")) {
+        return node;
+    }
+    while (IsNameTok(tokens, pos) && !IsPunct(tokens, pos, ")")) {
+        var pn = NewNode(arena, "param", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, pn);
+        if (!MatchPunct(tokens, pos, ",")) {
+            break;
+        }
+    }
+    ExpectPunct(tokens, pos, ")", errors, "')' after parameters");
+    AddChild(arena, node, ParseBlock(tokens, pos, arena, errors));
+    return node;
+}
+
+var ParseTagDecl(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "tag", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    Advance(tokens, pos);
+    if (IsNameTok(tokens, pos)) {
+        var dn = NewNode(arena, "declname", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, dn);
+    }
+    if (MatchPunct(tokens, pos, ":")) {
+        if (IsNameTok(tokens, pos)) {
+            var pnText = CurText(tokens, pos);
+            var pnLine = CurLine(tokens, pos);
+            var pnCol = CurCol(tokens, pos);
+            if (ExpectName(tokens, pos, errors, "parent tag name")) {
+                AddChild(arena, node, NewNode(arena, "parent", pnText, pnLine, pnCol));
+            }
+        }
+    }
+    ExpectPunct(tokens, pos, ";", errors, "';' after tag");
+    return node;
+}
+
+var ParseEnumDecl(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "enum", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    Advance(tokens, pos);
+    if (IsNameTok(tokens, pos)) {
+        var dn = NewNode(arena, "declname", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, dn);
+    }
+    if (!ExpectPunct(tokens, pos, "{", errors, "'{' after enum name")) {
+        return node;
+    }
+    while (IsNameTok(tokens, pos) && !IsPunct(tokens, pos, "}")) {
+        var mn = NewNode(arena, "member", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, mn);
+        if (!MatchPunct(tokens, pos, ",")) {
+            break;
+        }
+    }
+    ExpectPunct(tokens, pos, "}", errors, "'}' to close enum");
+    return node;
+}
+
+var ParseConstDecl(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "const", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    Advance(tokens, pos);
+    if (IsNameTok(tokens, pos)) {
+        var dn = NewNode(arena, "declname", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, dn);
+    }
+    if (ExpectPunct(tokens, pos, "=", errors, "'=' in const")) {
+        AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+    }
+    ExpectPunct(tokens, pos, ";", errors, "';' after const");
+    return node;
+}
+
+var ParseSystemDecl(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "system", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    Advance(tokens, pos);
+    if (IsNameTok(tokens, pos)) {
+        var dn = NewNode(arena, "declname", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, dn);
+    }
+    for (;;) {
+        if (MatchKw(tokens, pos, "with")) {
+            if (ExpectPunct(tokens, pos, "(", errors, "'(' after with")) {
+                while (IsNameTok(tokens, pos) && !IsPunct(tokens, pos, ")")) {
+                    var wn = NewNode(arena, "with", CurText(tokens, pos), CurLine(tokens, pos),
+                                     CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, node, wn);
+                    if (!MatchPunct(tokens, pos, ",")) {
+                        break;
+                    }
+                }
+                ExpectPunct(tokens, pos, ")", errors, "')' after with list");
+            }
+            continue;
+        }
+        if (MatchKw(tokens, pos, "without")) {
+            if (ExpectPunct(tokens, pos, "(", errors, "'(' after without")) {
+                while (IsNameTok(tokens, pos) && !IsPunct(tokens, pos, ")")) {
+                    var wn = NewNode(arena, "without", CurText(tokens, pos),
+                                     CurLine(tokens, pos), CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, node, wn);
+                    if (!MatchPunct(tokens, pos, ",")) {
+                        break;
+                    }
+                }
+                ExpectPunct(tokens, pos, ")", errors, "')' after without list");
+            }
+            continue;
+        }
+        break;
+    }
+    while (IsPunct(tokens, pos, "[")) {
+        Advance(tokens, pos);
+        var attr = NewNode(arena, "attr", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        if (IsNameTok(tokens, pos)) {
+            var an = NewNode(arena, "attrname", CurText(tokens, pos), CurLine(tokens, pos),
+                             CurCol(tokens, pos));
+            Advance(tokens, pos);
+            AddChild(arena, attr, an);
+        }
+        if (MatchPunct(tokens, pos, "(")) {
+            while (!IsPunct(tokens, pos, ")") && !AtEnd(tokens, pos)) {
+                AddChild(arena, attr, ParseExpression(tokens, pos, arena, errors));
+                if (!MatchPunct(tokens, pos, ",")) {
+                    break;
+                }
+            }
+            ExpectPunct(tokens, pos, ")", errors, "')' after attribute args");
+        }
+        ExpectPunct(tokens, pos, "]", errors, "']' to close attribute");
+        AddChild(arena, node, attr);
+    }
+    AddChild(arena, node, ParseBlock(tokens, pos, arena, errors));
+    return node;
+}
+
+var ParseProgram(tokens, pos, arena, errors, file) {
+    var root = NewNode(arena, "program", file, 0, 0);
+    while (!AtEnd(tokens, pos)) {
+        if (IsKw(tokens, pos, "using")) {
+            Advance(tokens, pos);
+            var un = NewNode(arena, "using", "", CurLine(tokens, pos), CurCol(tokens, pos));
+            while (IsNameTok(tokens, pos)) {
+                var nn = NewNode(arena, "useg", CurText(tokens, pos), CurLine(tokens, pos),
+                                 CurCol(tokens, pos));
+                Advance(tokens, pos);
+                AddChild(arena, un, nn);
+                if (!MatchPunct(tokens, pos, ".")) {
+                    break;
+                }
+            }
+            ExpectPunct(tokens, pos, ";", errors, "';' after using directive");
+            AddChild(arena, root, un);
+            continue;
+        }
+        if (IsKw(tokens, pos, "component")) {
+            AddChild(arena, root, ParseComponentDecl(tokens, pos, arena, errors, "component"));
+            continue;
+        }
+        if (IsKw(tokens, pos, "struct")) {
+            AddChild(arena, root, ParseComponentDecl(tokens, pos, arena, errors, "struct"));
+            continue;
+        }
+        if (IsKw(tokens, pos, "system")) {
+            AddChild(arena, root, ParseSystemDecl(tokens, pos, arena, errors));
+            continue;
+        }
+        if (IsKw(tokens, pos, "tag")) {
+            AddChild(arena, root, ParseTagDecl(tokens, pos, arena, errors));
+            continue;
+        }
+        if (IsKw(tokens, pos, "enum")) {
+            AddChild(arena, root, ParseEnumDecl(tokens, pos, arena, errors));
+            continue;
+        }
+        if (IsKw(tokens, pos, "const")) {
+            AddChild(arena, root, ParseConstDecl(tokens, pos, arena, errors));
+            continue;
+        }
+        if (IsKw(tokens, pos, "extern")) {
+            Advance(tokens, pos);
+            var en = NewNode(arena, "extern", "", CurLine(tokens, pos), CurCol(tokens, pos));
+            if (IsNameTok(tokens, pos)) {
+                var rn = NewNode(arena, "ret", CurText(tokens, pos), CurLine(tokens, pos),
+                                 CurCol(tokens, pos));
+                Advance(tokens, pos);
+                AddChild(arena, en, rn);
+            }
+            if (IsNameTok(tokens, pos)) {
+                var dn = NewNode(arena, "declname", CurText(tokens, pos), CurLine(tokens, pos),
+                                 CurCol(tokens, pos));
+                Advance(tokens, pos);
+                AddChild(arena, en, dn);
+            }
+            if (!ExpectPunct(tokens, pos, "(", errors, "'(' after function name")) {
+                AddChild(arena, root, en);
+                continue;
+            }
+            while (!IsPunct(tokens, pos, ")") && !AtEnd(tokens, pos)) {
+                if (IsNameTok(tokens, pos)) {
+                    var pt = NewNode(arena, "paramtype", CurText(tokens, pos),
+                                     CurLine(tokens, pos), CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, en, pt);
+                }
+                if (IsNameTok(tokens, pos)) {
+                    var pn = NewNode(arena, "param", CurText(tokens, pos), CurLine(tokens, pos),
+                                     CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, en, pn);
+                }
+                if (!MatchPunct(tokens, pos, ",")) {
+                    break;
+                }
+            }
+            ExpectPunct(tokens, pos, ")", errors, "')' after parameters");
+            ExpectPunct(tokens, pos, ";", errors, "';' after extern declaration");
+            AddChild(arena, root, en);
+            continue;
+        }
+        if (IsKw(tokens, pos, "var") || IsKw(tokens, pos, "void") ||
+            IsKw(tokens, pos, "int")) {
+            AddChild(arena, root, ParseFunctionDecl(tokens, pos, arena, errors));
+            continue;
+        }
+        if (IsPunct(tokens, pos, "[")) {
+            Advance(tokens, pos);
+            var attr = NewNode(arena, "attr", "", CurLine(tokens, pos), CurCol(tokens, pos));
+            if (IsNameTok(tokens, pos)) {
+                var an = NewNode(arena, "attrname", CurText(tokens, pos), CurLine(tokens, pos),
+                                 CurCol(tokens, pos));
+                Advance(tokens, pos);
+                AddChild(arena, attr, an);
+            }
+            if (MatchPunct(tokens, pos, "(")) {
+                while (!IsPunct(tokens, pos, ")") && !AtEnd(tokens, pos)) {
+                    AddChild(arena, attr, ParseExpression(tokens, pos, arena, errors));
+                    if (!MatchPunct(tokens, pos, ",")) {
+                        break;
+                    }
+                }
+                ExpectPunct(tokens, pos, ")", errors, "')' after attribute args");
+            }
+            ExpectPunct(tokens, pos, "]", errors, "']' to close attribute");
+            if (MatchKw(tokens, pos, "extern")) {
+                var en = NewNode(arena, "extern", "", CurLine(tokens, pos), CurCol(tokens, pos));
+                AddChild(arena, en, attr);
+                if (IsNameTok(tokens, pos)) {
+                    var rn = NewNode(arena, "ret", CurText(tokens, pos), CurLine(tokens, pos),
+                                     CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, en, rn);
+                }
+                if (IsNameTok(tokens, pos)) {
+                    var dn = NewNode(arena, "declname", CurText(tokens, pos),
+                                     CurLine(tokens, pos), CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, en, dn);
+                }
+                if (!ExpectPunct(tokens, pos, "(", errors, "'(' after function name")) {
+                    AddChild(arena, root, en);
+                    continue;
+                }
+                while (!IsPunct(tokens, pos, ")") && !AtEnd(tokens, pos)) {
+                    if (IsNameTok(tokens, pos)) {
+                        var pt = NewNode(arena, "paramtype", CurText(tokens, pos),
+                                         CurLine(tokens, pos), CurCol(tokens, pos));
+                        Advance(tokens, pos);
+                        AddChild(arena, en, pt);
+                    }
+                    if (IsNameTok(tokens, pos)) {
+                        var pn = NewNode(arena, "param", CurText(tokens, pos),
+                                         CurLine(tokens, pos), CurCol(tokens, pos));
+                        Advance(tokens, pos);
+                        AddChild(arena, en, pn);
+                    }
+                    if (!MatchPunct(tokens, pos, ",")) {
+                        break;
+                    }
+                }
+                ExpectPunct(tokens, pos, ")", errors, "')' after parameters");
+                ExpectPunct(tokens, pos, ";", errors, "';' after extern declaration");
+                AddChild(arena, root, en);
+                continue;
+            }
+            errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: attributes before a declaration require 'extern'");
+            continue;
+        }
+        errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: expected a top-level declaration");
+        Advance(tokens, pos);
+    }
+    return root;
+}
+
+/* ---------------- dump (mirrors kxc dump exactly) ---------------- */
+
+var Dump(arena, i) {
+    var n = arena.Get(i);
+    var out = "";
+    var kind = n.kind;
+    if (kind == "program") {
+        var s = "(program";
+        if (n.value != "") {
+            s += " file:" + n.value;
+        }
+        foreach (var c in n.children) {
+            s += " " + Dump(arena, c);
+        }
+        return s + ")";
+    }
+
+    if (kind == "string") {
+        return "(string \"" + n.value + "\")";
+    }
+    if (kind == "bool") {
+        return "(bool " + n.value + ")";
+    }
+    if (kind == "identifier") {
+        return "(identifier " + n.value + ")";
+    }
+    if (kind == "declname" || kind == "ret" || kind == "param" ||
+        kind == "varname" || kind == "typename" || kind == "compname" ||
+        kind == "istype" || kind == "isvar" ||
+        kind == "with" || kind == "without" ||
+        kind == "attrname" || kind == "useg" || kind == "spawntag") {
+        return n.value;
+    }
+    if (kind == "int" || kind == "float") {
+        if (kind == "float") {
+            return "(float " + TrimFloat(n.value) + ")";
+        }
+        return "(int " + n.value + ")";
+    }
+    if (kind == "typearg") {
+        return "<" + n.value + ">";
+    }
+    if (kind == "component" || kind == "struct" || kind == "tag" ||
+        kind == "enum" || kind == "const" || kind == "system" ||
+        kind == "function" || kind == "extern") {
+        return DumpDecl(arena, i);
+    }
+    if (kind == "binary" || kind == "unary" || kind == "assign") {
+        var s = "(" + kind + " " + n.value;
+        foreach (var c in n.children) {
+            s += " " + Dump(arena, c);
+        }
+        return s + ")";
+    }
+    if (kind == "member") {
+        return "(member " + Dump(arena, n.children.Get(0)) + " " + n.value + ")";
+    }
+    if (kind == "call") {
+        var s = "(call";
+        var first = true;
+        foreach (var c in n.children) {
+            var cn = arena.Get(c);
+            if (cn.kind == "typearg") {
+                s += " <" + cn.value + ">";
+            } else {
+                s += " " + Dump(arena, c);
+            }
+            first = false;
+        }
+        return s + ")";
+    }
+    if (kind == "arg") {
+        if (n.children.Count == 2 && arena.Get(n.children.Get(0)).kind == "argname") {
+            return arena.Get(n.children.Get(0)).value + ":" + Dump(arena, n.children.Get(1));
+        }
+        return Dump(arena, n.children.Get(0));
+    }
+    if (kind == "interpolated") {
+        var s = "(interpolated";
+        foreach (var c in n.children) {
+            var cn = arena.Get(c);
+            if (cn.kind == "lit") {
+                s += " \"" + cn.value + "\"";
+            } else {
+                s += " {";
+                s += Dump(arena, cn.children.Get(0));
+                s += "}";
+            }
+        }
+        return s + ")";
+    }
+    if (kind == "compinit") {
+        var s = "(";
+        foreach (var c in n.children) {
+            var cn = arena.Get(c);
+            if (cn.kind == "compname") {
+                s += cn.value;
+            } else if (cn.kind == "field") {
+                s += " " + cn.value + "=";
+                s += Dump(arena, cn.children.Get(0));
+            }
+        }
+        return s + ")";
+    }
+    if (kind == "spawn") {
+        var s = "(spawn";
+        foreach (var c in n.children) {
+            var cn = arena.Get(c);
+            if (cn.kind == "compinit") {
+                s += " " + Dump(arena, c);
+            } else if (cn.kind == "spawntag") {
+                s += " tag:" + cn.value;
+            }
+        }
+        return s + ")";
+    }
+    if (kind == "structinit") {
+        var s = "(structinit (" + n.value;
+        foreach (var c in n.children) {
+            var cn = arena.Get(c);
+            s += " " + cn.value + "=";
+            s += Dump(arena, cn.children.Get(0));
+        }
+        return s + "))";
+    }
+    if (kind == "case") {
+        var s = "(";
+        foreach (var c in n.children) {
+            var cn = arena.Get(c);
+            if (cn.kind == "block") {
+                s += " " + Dump(arena, c);
+            } else {
+                s += " case " + Dump(arena, c);
+            }
+        }
+        return s + ")";
+    }
+    var generic = "(" + kind;
+    foreach (var c in n.children) {
+        generic += " " + Dump(arena, c);
+    }
+    return generic + ")";
+}
+
+var DumpDecl(arena, i) {
+    var n = arena.Get(i);
+    if (n.kind == "component" || n.kind == "struct") {
+        var s = "(" + n.kind + " " + arena.Get(n.children.Get(0)).value;
+        for (var k = 1; k < n.children.Count; k++) {
+            var cn = arena.Get(n.children.Get(k));
+            s += " (" + cn.value + " " + Dump(arena, cn.children.Get(0)) + ")";
+        }
+        return s + ")";
+    }
+    if (n.kind == "tag") {
+        var s = "(tag " + arena.Get(n.children.Get(0)).value;
+        if (n.children.Count > 1) {
+            s += " : " + arena.Get(n.children.Get(1)).value;
+        }
+        return s + ")";
+    }
+    if (n.kind == "enum") {
+        var s = "(enum " + arena.Get(n.children.Get(0)).value;
+        for (var k = 1; k < n.children.Count; k++) {
+            s += " " + arena.Get(n.children.Get(k)).value;
+        }
+        return s + ")";
+    }
+    if (n.kind == "const") {
+        return "(const " + arena.Get(n.children.Get(0)).value + " " + Dump(arena, n.children.Get(1)) + ")";
+    }
+    if (n.kind == "system") {
+        var s = "(system " + arena.Get(n.children.Get(0)).value;
+        foreach (var c in n.children) {
+            var cn = arena.Get(c);
+            if (cn.kind == "with") {
+                s += " with:" + cn.value;
+            } else if (cn.kind == "without") {
+                s += " without:" + cn.value;
+            } else if (cn.kind == "attr") {
+                s += " [" + arena.Get(n.children.Get(0)).value;
+                if (cn.children.Count > 1) {
+                    s += " ";
+                    for (var k = 1; k < cn.children.Count; k++) {
+                        if (k > 1) {
+                            s += " ";
+                        }
+                        s += Dump(arena, cn.children.Get(k));
+                    }
+                }
+                s += "]";
+            } else if (cn.kind == "block") {
+                s += " " + Dump(arena, c);
+            }
+        }
+        return s + ")";
+    }
+    if (n.kind == "function" || n.kind == "extern") {
+        var s = "(function " + arena.Get(n.children.Get(0)).value + " " + arena.Get(n.children.Get(1)).value;
+        for (var k = 2; k < n.children.Count; k++) {
+            var cn = arena.Get(n.children.Get(k));
+            if (cn.kind == "param") {
+                s += " " + cn.value;
+            } else if (cn.kind == "block") {
+                s += " " + Dump(arena, n.children.Get(k));
+            }
+        }
+        return s + ")";
+    }
+    var generic = "(" + n.kind;
+    foreach (var c in n.children) {
+        generic += " " + Dump(arena, c);
+    }
+    return generic + ")";
+}
+
+/* ---------------- main ---------------- */
+
+int main() {
+    var dir = "";
+    var args = std.args();
+    if (args.Count > 0) {
+        dir = args.Get(0);
+    }
+    var content = std.readFile(dir);
+    var src = "";
+    if (content is string s) {
+        src = s;
+    } else {
+        std.println("cannot read file");
+        return 1;
+    }
+    var tokens = LexAll(src);
+    var pos = List<int>();
+    pos.Add(0);
+    var arena = List<AstNode>();
+    var errors = List<string>();
+    var root = ParseProgram(tokens, pos, arena, errors, dir);
+    var out = "";
+    out += Dump(arena, root);
+    if (errors.Count > 0) {
+        foreach (var e in errors) {
+            out += "\nERR: " + e;
+        }
+    }
+    out += "\n";
+    std.writeFile("/tmp/opencode/kx_parser_out.txt", out);
+    std.print(out);
+    return 0;
+}

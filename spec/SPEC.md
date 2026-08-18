@@ -647,9 +647,15 @@ No tag query in the program → no tag machinery emitted (§10 zero-cost).
 | M5 runtime v1 | done | SoA stores, tick loop, frozen view |
 | M6 multi-box | done | parallel boxes (pthreads), deterministic routing, core-count invariance proven (1 box == 8 boxes, byte-identical) |
 | M7 migration | done | deterministic rebalancing; migration is semantically invisible (frozen iteration sorted by entity ID) |
-| M8 stdlib v1 | done | kx.spatial (Pos3, Spatial tag, `spatial.Overlap/Nearby` with inline distance filter), arrow demo |
+| M8 stdlib v1 | done | kx.spatial (Pos3, Spatial tag, `spatial.Overlap/Nearby` with 3D hash grid), arrow demo |
 | collections | done | `List<T>` / `Map<K,V>` with ownership-tree semantics (deep copy, free on despawn), foreach over lists, frozen-snapshot mutation rejected at compile time |
-| kx.spatial grid index | planned | replace O(N) distance scan with a hash grid (needs nothing new — collections now exist) |
+| kx.spatial grid index | done | 3D hash grid in runtime (kx_spatial_build/query_begin/query_next), configurable cell size, replaces O(N) distance scan |
+| tag index | done | per-tag sorted index in runtime (buildTagIdx), O(log N + M) others<> queries replaces O(N) linear scan |
+| k-way merge | done | replaces qsort in mergeFrozen with min-heap k-way merge, O(N·log(boxCount)) |
+| free-list spawn | done | O(1) slot allocation via free-slot stack, replaces O(size) linear scan |
+| kxc new | done | project scaffolding: `kxc new <name>` creates Counter/CountSystem/main.kx |
+| cross-compilation | done | `--target <triple>` flag for cross-compiling (ARM64, ARM32, macOS, Windows) |
+| VS Code extension | done | syntax highlighting, native VS Code diagnostics, completion, hover, symbols, and go-to-definition |
 
 Core guarantees verified end-to-end:
 - **Zero data races** — live data only touched by the owning box; others always read the frozen view
@@ -657,9 +663,11 @@ Core guarantees verified end-to-end:
 - **Migration invariance** — forced migration produces byte-identical results
 - **Determinism** — repeated runs identical
 
-Run with `kxc build <dir> <out>`; `kxc run <dir>`; `kxc fmt <file>`;
-`kxc fmt-dir <dir>`; `KUBEXIC_CORES` env var controls box count (default:
-all cores); `KX_TRACE=1` traces every attach/detach/despawn request with
+Run with `kxc new <name>`, `kxc build <dir>`, `kxc run <dir>`,
+`kxc build --target <triple> <dir>` for cross-compilation,
+`kxc fmt <file>`, `kxc fmt-dir <dir>`.
+`KUBEXIC_CORES` env var controls box count (default: all cores);
+`KX_TRACE=1` traces every attach/detach/despawn request with
 component names.
 
 ### 21.1 Memory-safety status
