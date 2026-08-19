@@ -63,6 +63,17 @@ g++ "${KXC_FLAGS[@]}" $LLVM_FLAGS \
 
 ./build/kxc check-dir samples/arrow
 ./build/kxc mir samples/arrow
+
+echo
+echo "== building kubex (package manager) =="
+KUBEX_FLAGS=(-std=c++17 -O0 -w)
+g++ "${KUBEX_FLAGS[@]}" \
+  tools/kubex/main.cpp tools/kubex/kxconf.cpp tools/kubex/project.cpp \
+  tools/kubex/deps.cpp tools/kubex/build.cpp tools/kubex/init.cpp \
+  tools/kubex/semver.cpp tools/kubex/auth_manager.cpp \
+  tools/kubex/registry_client.cpp tools/kubex/archive_build.cpp \
+  -o build/kubex
+
 echo
 echo "== e2e golden tests =="
 ./tests/e2e/run_e2e.sh

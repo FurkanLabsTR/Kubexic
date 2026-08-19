@@ -2045,11 +2045,10 @@ bool Codegen::emitObject(const std::string& objectPath) {
       emitSystemFunction(*d);
     }
     auto mainDecl = checker_.functionByName("main");
-    if (!mainDecl) {
-      errors_.push_back("codegen: no main function");
-    } else {
+    if (mainDecl) {
       emitFunction(*mainDecl, {});
     }
+    // Library mode: no main required, emit all other functions
   }
   if (!errors_.empty()) return false;
   if (const char* dump = std::getenv("KX_DUMP_IR")) {
@@ -2101,6 +2100,34 @@ bool Codegen::emitExecutable(const std::string& objectPath, const std::string& r
   int rc = std::system(cmd.c_str());
   if (rc != 0) {
     errors_.push_back("codegen: linking failed");
+    return false;
+  }
+  return true;
+}
+
+bool Codegen::emitSharedLibrary(const std::string& objectPath, const std::string& runtimeObject,
+                                const std::string& outputPath, const std::string& crossCompiler) {
+  if (!emitObject(objectPath)) return false;
+  // Add .so extension if not already present
+  std::string out = outputPath;
+  if (out.find(".so") == std::string::npos) out += ".so";
+  std::string cmd = crossCompiler + " -shared " + objectPath + " " + runtimeObject + " -lpthread -lm";
+  for (const auto& lib : linkLibraries()) cmd += " -l" + lib;
+  cmd += " -o " + out;
+  int rc = std::system(cmd.c_str());
+  if (rc != 0) {
+    errors_.push_back("codegen: shared library linking failed");
+    return false;
+  }
+  return true;
+}
+
+bool Codegen::emitStaticLibrary(const std::string& objectPath, const std::string& outputPath) {
+  if (!emitObject(objectPath)) return false;
+  std::string cmd = "ar rcs " + outputPath + " " + objectPath;
+  int rc = std::system(cmd.c_str());
+  if (rc != 0) {
+    errors_.push_back("codegen: static library creation failed");
     return false;
   }
   return true;

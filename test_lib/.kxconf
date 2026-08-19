@@ -1,0 +1,13 @@
+// .kxconf
+[package]
+name = "test_lib"
+version = "0.1.0"
+description = "A test library"
+
+[target]
+kind = "library"
+libtype = "shared"
+output = "libtest_lib"
+
+[build]
+optimization = "release"

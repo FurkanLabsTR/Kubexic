@@ -490,20 +490,29 @@ std::unique_ptr<Program> Parser::parse() {
 }
 
 Decl Parser::parseTopLevel() {
+  bool isPublic = false;
+  if (check(TokenKind::KwPub)) {
+    advance();
+    isPublic = true;
+  }
+
+  Decl d;
   switch (peek().kind) {
-    case TokenKind::KwComponent: return parseComponent();
-    case TokenKind::KwSystem: return parseSystem();
-    case TokenKind::KwTag: return parseTag();
-    case TokenKind::KwStruct: return parseStruct();
-    case TokenKind::KwEnum: return parseEnum();
-    case TokenKind::KwConst: return parseConst();
+    case TokenKind::KwComponent: d = parseComponent(); break;
+    case TokenKind::KwSystem: d = parseSystem(); break;
+    case TokenKind::KwTag: d = parseTag(); break;
+    case TokenKind::KwStruct: d = parseStruct(); break;
+    case TokenKind::KwEnum: d = parseEnum(); break;
+    case TokenKind::KwConst: d = parseConst(); break;
     case TokenKind::KwVoid:
     case TokenKind::KwVar:
     case TokenKind::KwInt:
-      return parseFunction();
+      d = parseFunction();
+      break;
     case TokenKind::KwExtern: {
       advance();
-      return parseExtern({});
+      d = parseExtern({});
+      break;
     }
     case TokenKind::LBracket: {
       std::vector<Attribute> attrs;
@@ -523,7 +532,8 @@ Decl Parser::parseTopLevel() {
       }
       if (check(TokenKind::KwExtern)) {
         advance();
-        return parseExtern(std::move(attrs));
+        d = parseExtern(std::move(attrs));
+        break;
       }
       errorHere("attributes before a declaration require 'extern'");
       return Decl{};
@@ -533,6 +543,8 @@ Decl Parser::parseTopLevel() {
       advance();
       return Decl{};
   }
+  d.isPublic = isPublic;
+  return d;
 }
 
 Decl Parser::parseComponent() {

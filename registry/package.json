@@ -1,0 +1,16 @@
+{
+  "name": "kubex-registry",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute kubex-registry-db --file=./migrations/0001_initial.sql",
+    "db:init:local": "wrangler d1 execute kubex-registry-db --local --file=./migrations/0001_initial.sql"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240923.0",
+    "typescript": "^5.5.0",
+    "wrangler": "^3.70.0"
+  }
+}

@@ -38,9 +38,93 @@ bool isFrozenAccess(const Expr* e) {
 
 }  // namespace
 
-void Checker::addProgram(std::unique_ptr<Program> program) {
+void Checker::addProgram(std::unique_ptr<Program> program, const std::string& sourceRoot) {
+  if (!sourceRoot.empty()) {
+    currentSourceRoot_ = sourceRoot;
+  }
+  if (!program->sourceRoot.empty()) {
+    currentSourceRoot_ = program->sourceRoot;
+  }
+  // Compute namespace from file path relative to source root
+  if (!currentSourceRoot_.empty()) {
+    std::string filePath = program->file;
+    // Normalize: find sourceRoot in filePath and extract relative path
+    auto pos = filePath.rfind(currentSourceRoot_);
+    if (pos != std::string::npos) {
+      std::string relPath = filePath.substr(pos + currentSourceRoot_.size());
+      // Remove leading slash
+      if (!relPath.empty() && (relPath[0] == '/' || relPath[0] == '\\')) {
+        relPath = relPath.substr(1);
+      }
+      // Take the directory part as namespace
+      auto slashPos = relPath.find_last_of("/\\");
+      if (slashPos != std::string::npos) {
+        std::string ns = relPath.substr(0, slashPos);
+        // Convert path separators to dots
+        for (char& c : ns) {
+          if (c == '/' || c == '\\') c = '.';
+        }
+        program->namespaceName = ns;
+      }
+    }
+  }
   for (const auto& d : program->decls) declare(d);
+  resolveNamespaces();
   programs_.push_back(std::move(program));
+}
+
+void Checker::resolveNamespaces() {
+  if (programs_.empty()) return;
+  const auto& prog = programs_.back();
+  for (const auto& ns : prog->usings) {
+    // For each using directive, find all pub declarations from that namespace
+    // and make them available unqualified
+    for (const auto& [qname, decl] : components_) {
+      if (qname.size() > ns.size() + 1 && qname.substr(0, ns.size()) == ns &&
+          qname[ns.size()] == '.') {
+        std::string shortName = qname.substr(ns.size() + 1);
+        if (decl->isPublic && !components_.count(shortName)) {
+          components_[shortName] = decl;
+        }
+      }
+    }
+    for (const auto& [qname, decl] : systems_) {
+      if (qname.size() > ns.size() + 1 && qname.substr(0, ns.size()) == ns &&
+          qname[ns.size()] == '.') {
+        std::string shortName = qname.substr(ns.size() + 1);
+        if (decl->isPublic && !systems_.count(shortName)) {
+          systems_[shortName] = decl;
+        }
+      }
+    }
+    for (const auto& [qname, decl] : tags_) {
+      if (qname.size() > ns.size() + 1 && qname.substr(0, ns.size()) == ns &&
+          qname[ns.size()] == '.') {
+        std::string shortName = qname.substr(ns.size() + 1);
+        if (decl->isPublic && !tags_.count(shortName)) {
+          tags_[shortName] = decl;
+        }
+      }
+    }
+    for (const auto& [qname, decl] : structs_) {
+      if (qname.size() > ns.size() + 1 && qname.substr(0, ns.size()) == ns &&
+          qname[ns.size()] == '.') {
+        std::string shortName = qname.substr(ns.size() + 1);
+        if (decl->isPublic && !structs_.count(shortName)) {
+          structs_[shortName] = decl;
+        }
+      }
+    }
+    for (const auto& [qname, decl] : enums_) {
+      if (qname.size() > ns.size() + 1 && qname.substr(0, ns.size()) == ns &&
+          qname[ns.size()] == '.') {
+        std::string shortName = qname.substr(ns.size() + 1);
+        if (decl->isPublic && !enums_.count(shortName)) {
+          enums_[shortName] = decl;
+        }
+      }
+    }
+  }
 }
 
 void Checker::error(const SourceLoc& loc, const std::string& msg) {
@@ -57,6 +141,7 @@ void Checker::declare(const Decl& d) {
     return true;
   };
 
+  // Register in the flat (unqualified) namespace
   switch (d.kind) {
     case Decl::Kind::Component:
       if (registerName(d.name)) components_[d.name] = &d;
@@ -103,10 +188,38 @@ void Checker::declare(const Decl& d) {
       break;
     }
   }
+
+  // Also register under namespace-qualified name if the program has a namespace
+  if (!programs_.empty() && !programs_.back()->namespaceName.empty()) {
+    std::string qname = programs_.back()->namespaceName + "." + d.name;
+    switch (d.kind) {
+      case Decl::Kind::Component:
+        components_[qname] = &d;
+        break;
+      case Decl::Kind::System:
+        systems_[qname] = &d;
+        break;
+      case Decl::Kind::Tag:
+        tags_[qname] = &d;
+        break;
+      case Decl::Kind::Struct:
+        structs_[qname] = &d;
+        break;
+      case Decl::Kind::Enum:
+        enums_[qname] = &d;
+        break;
+      case Decl::Kind::Const:
+        consts_[qname] = consts_[d.name];
+        break;
+      case Decl::Kind::Function:
+        functions_[qname].push_back(&d);
+        break;
+    }
+  }
 }
 
 bool Checker::check() {
-  if (mainSeen_ == false) errors_.push_back("0:0: program must declare exactly one 'main' function");
+  if (requireMain_ && mainSeen_ == false) errors_.push_back("0:0: program must declare exactly one 'main' function");
 
   for (const auto& [name, tag] : tags_) {
     if (!tag->parentTag.empty() && !tags_.count(tag->parentTag)) {

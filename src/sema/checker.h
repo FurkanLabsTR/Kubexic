@@ -13,7 +13,7 @@ namespace kx {
 
 class Checker {
  public:
-  void addProgram(std::unique_ptr<Program> program);
+  void addProgram(std::unique_ptr<Program> program, const std::string& sourceRoot = "");
   bool check();
   const std::vector<std::string>& errors() const { return errors_; }
   const std::map<std::string, const Decl*>& components() const { return components_; }
@@ -26,6 +26,7 @@ class Checker {
   bool constValue(const std::string& name, ConstValue* out) const;
   std::shared_ptr<Type> reInferBody(const std::vector<StmtPtr>& body,
                                     const std::map<std::string, std::shared_ptr<Type>>& params);
+  void setRequireMain(bool require) { requireMain_ = require; }
 
  private:
   struct Local {
@@ -47,17 +48,21 @@ class Checker {
   std::vector<std::vector<Local>> scopes_;
   std::vector<std::string> errors_;
   std::map<std::string, std::shared_ptr<Type>> reInferCache_;
+  std::map<std::string, std::string> namespaceMap_;
+  std::string currentSourceRoot_;
 
   std::string curFnName_;
   std::string curFnRet_;
   std::shared_ptr<Type> varRetType_;
   bool inSystem_ = false;
   bool mainSeen_ = false;
+  bool requireMain_ = true;
   int loopDepth_ = 0;
   int switchDepth_ = 0;
 
   void error(const SourceLoc& loc, const std::string& msg);
   void declare(const Decl& d);
+  void resolveNamespaces();
   void pushScope();
   void popScope();
   void addLocal(const std::string& name, std::shared_ptr<Type> t);

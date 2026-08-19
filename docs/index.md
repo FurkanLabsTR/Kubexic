@@ -68,6 +68,7 @@ done
 - [Collections & Spatial](collections.md) -- `List<T>`, `Map<K,V>`, and spatial queries.
 - [CLI Reference](cli.md) -- all `kxc` commands and options.
 - [VS Code Extension](vscode.md) -- editor setup, diagnostics, and code completion.
+- [Kubex Package Manager](kubex-tutorial.md) -- project management, dependencies, publishing, registry.
 
 ---
 

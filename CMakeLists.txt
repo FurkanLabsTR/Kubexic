@@ -14,5 +14,6 @@ include_directories(${LLVM_INCLUDE_DIRS})
 
 add_subdirectory(src)
 add_subdirectory(tools/kxc)
+add_subdirectory(tools/kubex)
 enable_testing()
 add_subdirectory(tests)

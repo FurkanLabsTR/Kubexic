@@ -1,0 +1,15 @@
+name = "kubex-registry"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+
+[vars]
+API_BASE = "/v1"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "kubex-registry-db"
+database_id = "PLACEHOLDER_D1_ID"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "kubex-registry-bucket"

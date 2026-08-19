@@ -23,6 +23,9 @@ class Codegen {
   bool emitObject(const std::string& objectPath);
   bool emitExecutable(const std::string& objectPath, const std::string& runtimeObject,
                       const std::string& outputPath, const std::string& crossCompiler = "gcc");
+  bool emitSharedLibrary(const std::string& objectPath, const std::string& runtimeObject,
+                         const std::string& outputPath, const std::string& crossCompiler = "gcc");
+  bool emitStaticLibrary(const std::string& objectPath, const std::string& outputPath);
   const std::vector<std::string>& errors() const { return errors_; }
 
  private:

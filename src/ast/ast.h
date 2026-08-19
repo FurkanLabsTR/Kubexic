@@ -170,6 +170,7 @@ struct Decl {
   std::vector<std::string> paramTypes;
   std::string retKind;
   bool isExtern = false;
+  bool isPublic = false;
   std::string parentTag;
   std::vector<std::string> enumMembers;
   ExprPtr constValue;
@@ -178,6 +179,7 @@ struct Decl {
 struct Program {
   std::string file;
   std::string namespaceName;
+  std::string sourceRoot;
   std::vector<std::string> usings;
   std::vector<Decl> decls;
 };
