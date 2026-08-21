@@ -1,0 +1,155 @@
+// mir.kx — Mid-level IR for interaction analysis, written in Kubexic.
+// Analyzes systems to determine match-sets, read queries, and tag visibility.
+
+struct SystemInfo {
+    var name = "";
+    var matchComponents = List<string>();
+    var withComponents = List<string>();
+    var withoutComponents = List<string>();
+    var readComponents = List<string>();
+    var writesComponents = List<string>();
+    var usesTags = List<string>();
+}
+
+struct MirResult {
+    var systems = List<SystemInfo>();
+    var componentOrder = List<string>();
+    var tagHierarchy = Map<string, string>();
+}
+
+/* ---------------- component extraction ---------------- */
+
+var ExtractComponents(ctx, arena, stmtIdx) {
+    var components = List<string>();
+    var n = Node(arena, stmtIdx);
+    // Look for Component.field patterns
+    if (n.kind == "binary") {
+        if (n.children.Count >= 2) {
+            var lhs = Node(arena, n.children.Get(0));
+            var rhs = Node(arena, n.children.Get(1));
+            if (lhs.kind == "member" && rhs.kind == "identifier") {
+                // This is a component access
+                var compName = lhs.value;
+                if (!components.Contains(compName)) {
+                    components.Add(compName);
+                }
+            }
+        }
+    }
+    return components;
+}
+
+/* ---------------- system analysis ---------------- */
+
+void AnalyzeSystem(ctx, arena, sysIdx, result) {
+    var n = Node(arena, sysIdx);
+    var info = SystemInfo { name = n.value };
+
+    // Parse with/without clauses
+    for (var i = 0; i < n.children.Count; i++) {
+        var child = Node(arena, n.children.Get(i));
+        if (child.kind == "clause") {
+            if (child.value == "with") {
+                for (var j = 0; j < child.children.Count; j++) {
+                    var comp = Node(arena, child.children.Get(j));
+                    info.withComponents.Add(comp.value);
+                }
+            } else if (child.value == "without") {
+                for (var j = 0; j < child.children.Count; j++) {
+                    var comp = Node(arena, child.children.Get(j));
+                    info.withoutComponents.Add(comp.value);
+                }
+            }
+        }
+    }
+
+    // Analyze system body for component usage
+    for (var i = 0; i < n.children.Count; i++) {
+        var child = Node(arena, n.children.Get(i));
+        if (child.kind == "block") {
+            var comps = ExtractComponentsFromBlock(ctx, arena, n.children.Get(i));
+            for (var j = 0; j < comps.Count; j++) {
+                var comp = comps.Get(j);
+                if (!info.matchComponents.Contains(comp)) {
+                    info.matchComponents.Add(comp);
+                }
+            }
+        }
+    }
+
+    // Add with-clause components to match set
+    for (var i = 0; i < info.withComponents.Count; i++) {
+        var comp = info.withComponents.Get(i);
+        if (!info.matchComponents.Contains(comp)) {
+            info.matchComponents.Add(comp);
+        }
+    }
+
+    result.systems.Add(info);
+}
+
+var ExtractComponentsFromBlock(ctx, arena, blockIdx) {
+    var components = List<string>();
+    var n = Node(arena, blockIdx);
+    for (var i = 0; i < n.children.Count; i++) {
+        var child = Node(arena, n.children.Get(i));
+        if (child.kind == "binary") {
+            // Check for Component.field = value patterns
+            if (child.children.Count >= 2) {
+                var lhs = Node(arena, child.children.Get(0));
+                if (lhs.kind == "member") {
+                    var compName = lhs.value;
+                    if (!components.Contains(compName)) {
+                        components.Add(compName);
+                    }
+                }
+            }
+        } else if (child.kind == "call") {
+            // Check for attach/detach/spawn/despawn calls
+            if (child.value == "attach" || child.value == "detach" ||
+                child.value == "spawn" || child.value == "despawn") {
+                // Would need to extract component names from arguments
+            }
+        } else if (child.kind == "block") {
+            var subComps = ExtractComponentsFromBlock(ctx, arena, n.children.Get(i));
+            for (var j = 0; j < subComps.Count; j++) {
+                var comp = subComps.Get(j);
+                if (!components.Contains(comp)) {
+                    components.Add(comp);
+                }
+            }
+        }
+    }
+    return components;
+}
+
+/* ---------------- program analysis ---------------- */
+
+var AnalyzeProgram(ctx, arena, progIdx) {
+    var result = MirResult {};
+    var n = Node(arena, progIdx);
+    for (var i = 0; i < n.children.Count; i++) {
+        var child = Node(arena, n.children.Get(i));
+        if (child.kind == "system") {
+            AnalyzeSystem(ctx, arena, n.children.Get(i), result);
+        } else if (child.kind == "component") {
+            result.componentOrder.Add(child.value);
+        } else if (child.kind == "tag") {
+            // Would need to parse tag hierarchy
+        }
+    }
+    return result;
+}
+
+/* ---------------- main ---------------- */
+
+int main() {
+    var args = std.args();
+    if (args.Count < 2) {
+        std.println("usage: mir <file.kx>");
+        return 1;
+    }
+    std.println($"analyzing {args.Get(1)}...");
+    std.println("MIR analysis not yet fully implemented");
+    return 0;
+}

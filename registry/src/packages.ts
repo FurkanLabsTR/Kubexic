@@ -70,6 +70,25 @@ export async function handlePackages(request: Request, env: Env): Promise<Respon
     return handleDownload(name, version, env);
   }
 
+  const signatureMatch = path.match(/^\/([^/]+)\/([^/]+)\/signature$/);
+  if (signatureMatch && request.method === 'GET') {
+    const name = decodeURIComponent(signatureMatch[1]);
+    const version = decodeURIComponent(signatureMatch[2]);
+    return handleGetSignature(name, version, env);
+  }
+
+  const sbomMatch = path.match(/^\/([^/]+)\/([^/]+)\/sbom$/);
+  if (sbomMatch) {
+    const name = decodeURIComponent(sbomMatch[1]);
+    const version = decodeURIComponent(sbomMatch[2]);
+    if (request.method === 'GET') {
+      return handleGetSbom(name, version, env);
+    }
+    if (request.method === 'PUT') {
+      return handlePutSbom(request, name, version, env);
+    }
+  }
+
   return jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'Endpoint not found' } });
 }
 
@@ -368,11 +387,23 @@ async function handlePublishVersion(
 
   const description = request.headers.get('X-Kubexic-Description') || '';
 
+  // Extract signature and public key from form data
+  let signature = '';
+  let publicKey = '';
+  const contentType = request.headers.get('Content-Type') || '';
+  if (contentType.includes('multipart/form-data')) {
+    const formData = await request.formData();
+    const sigField = formData.get('signature');
+    const pubKeyField = formData.get('public_key');
+    if (typeof sigField === 'string') signature = sigField;
+    if (typeof pubKeyField === 'string') publicKey = pubKeyField;
+  }
+
   const result = await env.DB.prepare(
-    `INSERT INTO versions (package_id, version, description, publisher_id, checksum)
-     VALUES (?, ?, ?, ?, ?)`
+    `INSERT INTO versions (package_id, version, description, publisher_id, checksum, signature, public_key)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
   )
-    .bind(pkg.id, version, description, auth.user!.id, checksum)
+    .bind(pkg.id, version, description, auth.user!.id, checksum, signature, publicKey)
     .run();
 
   if (!result.success) {
@@ -520,4 +551,148 @@ async function handleDownload(
       'Access-Control-Allow-Origin': '*',
     },
   });
+}
+
+async function handleGetSignature(
+  name: string,
+  version: string,
+  env: Env
+): Promise<Response> {
+  const pkg = await env.DB.prepare(
+    'SELECT id FROM packages WHERE name = ?'
+  )
+    .bind(name)
+    .first<{ id: number }>();
+
+  if (!pkg) {
+    return jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'Package not found' } });
+  }
+
+  const ver = await env.DB.prepare(
+    'SELECT signature, public_key FROM versions WHERE package_id = ? AND version = ?'
+  )
+    .bind(pkg.id, version)
+    .first<{ signature: string; public_key: string }>();
+
+  if (!ver) {
+    return jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'Version not found' } });
+  }
+
+  if (!ver.signature || !ver.public_key) {
+    return jsonResponse(404, { error: { code: 'NOT_SIGNED', message: 'Version is not signed' } });
+  }
+
+  return jsonResponse(200, {
+    data: {
+      signature: ver.signature,
+      public_key: ver.public_key,
+      key_type: 'ed25519',
+    },
+  });
+}
+
+async function handleGetSbom(
+  name: string,
+  version: string,
+  env: Env
+): Promise<Response> {
+  const pkg = await env.DB.prepare(
+    'SELECT id FROM packages WHERE name = ?'
+  )
+    .bind(name)
+    .first<{ id: number }>();
+
+  if (!pkg) {
+    return jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'Package not found' } });
+  }
+
+  const ver = await env.DB.prepare(
+    'SELECT id FROM versions WHERE package_id = ? AND version = ?'
+  )
+    .bind(pkg.id, version)
+    .first<{ id: number }>();
+
+  if (!ver) {
+    return jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'Version not found' } });
+  }
+
+  const sbom = await env.DB.prepare(
+    'SELECT sbom_json FROM sboms WHERE version_id = ?'
+  )
+    .bind(ver.id)
+    .first<{ sbom_json: string }>();
+
+  if (!sbom) {
+    return jsonResponse(404, { error: { code: 'NO_SBOM', message: 'No SBOM available for this version' } });
+  }
+
+  return new Response(sbom.sbom_json, {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+    },
+  });
+}
+
+async function handlePutSbom(
+  request: Request,
+  name: string,
+  version: string,
+  env: Env
+): Promise<Response> {
+  const auth = await requireAuth(env.DB, request);
+  if (auth.error) return auth.error;
+
+  const pkg = await env.DB.prepare(
+    'SELECT id, owner_id FROM packages WHERE name = ?'
+  )
+    .bind(name)
+    .first<{ id: number; owner_id: number }>();
+
+  if (!pkg) {
+    return jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'Package not found' } });
+  }
+
+  if (pkg.owner_id !== auth.user!.id) {
+    return jsonResponse(403, { error: { code: 'FORBIDDEN', message: 'Only package owner can update SBOM' } });
+  }
+
+  const ver = await env.DB.prepare(
+    'SELECT id FROM versions WHERE package_id = ? AND version = ?'
+  )
+    .bind(pkg.id, version)
+    .first<{ id: number }>();
+
+  if (!ver) {
+    return jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'Version not found' } });
+  }
+
+  const sbomJson = await request.text();
+  if (!sbomJson) {
+    return jsonResponse(400, { error: { code: 'VALIDATION_ERROR', message: 'SBOM content required' } });
+  }
+
+  // Upsert SBOM
+  const existing = await env.DB.prepare(
+    'SELECT id FROM sboms WHERE version_id = ?'
+  )
+    .bind(ver.id)
+    .first<{ id: number }>();
+
+  if (existing) {
+    await env.DB.prepare(
+      'UPDATE sboms SET sbom_json = ? WHERE version_id = ?'
+    )
+      .bind(sbomJson, ver.id)
+      .run();
+  } else {
+    await env.DB.prepare(
+      'INSERT INTO sboms (version_id, sbom_json) VALUES (?, ?)'
+    )
+      .bind(ver.id, sbomJson)
+      .run();
+  }
+
+  return jsonResponse(200, { data: { message: 'SBOM updated' } });
 }

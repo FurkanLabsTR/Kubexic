@@ -1,0 +1,101 @@
+// llvm_bindings.kx — extern declarations for LLVM C API
+// Used by codegen.kx to generate native code via LLVM
+
+// Module operations
+extern void* LLVMModuleCreateWithName(const char* name);
+extern void LLVMDisposeModule(void* m);
+extern void LLVMSetTarget(void* m, const char* triple);
+extern const char* LLVMGetTarget(void* m);
+extern void LLVMDumpModule(void* m);
+
+// Type operations
+extern void* LLVMInt1Type();
+extern void* LLVMInt8Type();
+extern void* LLVMInt16Type();
+extern void* LLVMInt32Type();
+extern void* LLVMInt64Type();
+extern void* LLVMFloatType();
+extern void* LLVMDoubleType();
+extern void* LLVMVoidType();
+extern void* LLVMPointerType(void* ty, unsigned addressSpace);
+extern void* LLVMFunctionType(void* retTy, void* paramTypes, int paramCount, int isVarArg);
+extern void* LLVMStructType(void* elementTypes, int elementCount, int packed);
+extern void* LLVMArrayType(void* elemTy, int count);
+
+// Function operations
+extern void* LLVMAddFunction(void* m, const char* name, void* fnTy);
+extern void* LLVMGetNamedFunction(void* m, const char* name);
+extern void* LLVMAppendBasicBlock(void* fn, const char* name);
+extern void LLVMDeleteFunction(void* fn);
+
+// Builder operations
+extern void* LLVMCreateBuilder();
+extern void LLVMDisposeBuilder(void* builder);
+extern void LLVMPositionBuilderAtEnd(void* builder, void* block);
+extern void* LLVMGetInsertBlock(void* builder);
+
+// Instruction building
+extern void* LLVMBuildAlloca(void* builder, void* ty, const char* name);
+extern void* LLVMBuildStore(void* builder, void* val, void* ptr);
+extern void* LLVMBuildLoad(void* builder, void* ty, void* ptr, const char* name);
+extern void* LLVMBuildAdd(void* builder, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildSub(void* builder, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildMul(void* builder, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildSDiv(void* builder, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildSRem(void* builder, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildFAdd(void* builder, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildFSub(void* builder, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildFMul(void* builder, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildFDiv(void* builder, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildRet(void* builder, void* val);
+extern void* LLVMBuildRetVoid(void* builder);
+extern void* LLVMBuildBr(void* builder, void* dest);
+extern void* LLVMBuildCondBr(void* builder, void* cond, void* then, void* otherwise);
+extern void* LLVMBuildICmp(void* builder, int pred, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildFCmp(void* builder, int pred, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildCall(void* builder, void* fn, void* args, int argCount, const char* name);
+extern void* LLVMBuildGEP(void* builder, void* ty, void* pointer, void* indices, int numIndices, const char* name);
+extern void* LLVMBuildStructGEP(void* builder, void* ty, void* pointer, int index, const char* name);
+extern void* LLVMBuildGlobalStringPtr(void* builder, const char* str, const char* name);
+extern void* LLVMBuildBitCast(void* builder, void* val, void* ty, const char* name);
+extern void* LLVMBuildSExt(void* builder, void* val, void* ty, const char* name);
+extern void* LLVMBuildTrunc(void* builder, void* val, void* ty, const char* name);
+extern void* LLVMBuildSIToFP(void* builder, void* val, void* ty, const char* name);
+extern void* LLVMBuildFPTrunc(void* builder, void* val, void* ty, const char* name);
+extern void* LLVMBuildFPExt(void* builder, void* val, void* ty, const char* name);
+extern void* LLVMBuildNot(void* builder, void* val, const char* name);
+extern void* LLVMBuildNeg(void* builder, void* val, const char* name);
+extern void* LLVMBuildFNeg(void* builder, void* val, const char* name);
+extern void* LLVMBuildSelect(void* builder, void* cond, void* then, void* otherwise, const char* name);
+extern void* LLVMBuildPHI(void* builder, void* ty, const char* name);
+extern void LLVMAddIncoming(void* phi, void* val, void* block);
+
+// Constant operations
+extern void* LLVMConstInt(void* ty, long long val, int signExtend);
+extern void* LLVMConstReal(void* ty, double val);
+extern void* LLVMConstString(const char* str, int length, int dontNullTerminate);
+extern void* LLVMConstNull(void* ty);
+extern void* LLVMGetUndef(void* ty);
+
+// Global variable operations
+extern void* LLVMAddGlobal(void* m, void* ty, const char* name);
+extern void LLVMSetGlobalConstant(void* global, int isConstant);
+extern void LLVMSetInitializer(void* global, void* constant);
+
+// Target machine operations
+extern void* LLVMCreateTargetMachine(void* target, const char* triple, const char* cpu, const char* features, int relocMode, int codeModel, int optimizationLevel);
+extern void LLVMDisposeTargetMachine(void* tm);
+extern int LLVMTargetMachineEmitToFile(void* tm, void* m, const char* filename, int fileType, char** errorMessage);
+
+// Analysis
+extern int LLVMVerifyModule(void* m, int action, char** errorMessage);
+
+// Initialization
+extern void LLVMInitializeX86TargetInfo();
+extern void LLVMInitializeX86Target();
+extern void LLVMInitializeX86TargetMC();
+extern void LLVMInitializeX86AsmPrinter();
+extern void LLVMInitializeAArch64TargetInfo();
+extern void LLVMInitializeAArch64Target();
+extern void LLVMInitializeAArch64TargetMC();
+extern void LLVMInitializeAArch64AsmPrinter();

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -22,8 +23,17 @@ struct DepInfo {
   std::string version;
   std::string versionReq;
   std::filesystem::path cachePath;
+  std::map<std::string, std::string> transitiveDeps;
 };
 
+// Resolve direct dependencies only (original behavior)
 std::vector<DepInfo> resolveDependencies(const std::map<std::string, std::string>& deps);
+
+// Resolve all dependencies recursively (transitive)
+// Returns resolved dependencies in topological order
+// Detects cycles and version conflicts
+std::vector<DepInfo> resolveDependenciesTransitive(
+    const std::map<std::string, std::string>& deps,
+    std::vector<std::string>& errors);
 
 }  // namespace kubex

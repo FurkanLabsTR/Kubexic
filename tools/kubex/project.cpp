@@ -48,6 +48,14 @@ std::vector<std::filesystem::path> collectKxFiles(const std::filesystem::path& d
   std::vector<std::filesystem::path> files;
   if (!std::filesystem::exists(dir)) return files;
 
+  // If it's a single file, return just that file
+  if (std::filesystem::is_regular_file(dir)) {
+    if (dir.extension() == ".kx") {
+      files.push_back(dir);
+    }
+    return files;
+  }
+
   for (const auto& entry : std::filesystem::recursive_directory_iterator(dir)) {
     if (!entry.is_regular_file()) continue;
     if (entry.path().extension() != ".kx") continue;

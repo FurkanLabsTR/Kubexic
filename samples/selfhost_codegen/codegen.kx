@@ -1792,6 +1792,26 @@ var SigParams(sig) {
     return SplitAll(p, ",");
 }
 
+var FindStructWithField(g, fieldName) {
+    for (var i = 0; i < g.structVars.Count; i++) {
+        var sn = g.structVars.Get(i);
+        var fields = SplitAll(g.structs.Get(sn), ",");
+        for (var j = 0; j < fields.Count; j++) {
+            if (fields.Get(j) == fieldName) return sn;
+        }
+    }
+    return "";
+}
+
+var ParamIndex(g, fnName, paramName) {
+    if (!g.sigs.Has(fnName)) return -1;
+    var params = SigParams(g.sigs.Get(fnName));
+    for (var i = 0; i < params.Count; i++) {
+        if (params.Get(i) == paramName) return i;
+    }
+    return -1;
+}
+
 var SigSetParam(g, name, index, type) {
     if (!g.sigs.Has(name)) return 0;
     var sig = g.sigs.Get(name);
@@ -1800,7 +1820,9 @@ var SigSetParam(g, name, index, type) {
     if (index >= params.Count) return 0;
     var old = params.Get(index);
     if (old == type || type == "unknown") return 0;
-    if (old == "i64" && type == "ptr") {
+    var promote = (old == "i64" && type == "ptr") ||
+                  (old == "i64" && type.StartsWith("struct:"));
+    if (promote) {
         params.Set(index, type);
         g.sigs.Set(name, ret + "|" + JoinParts(params, ","));
     }
@@ -1851,9 +1873,35 @@ var InferExprType(g, e, arena, locals, fnName) {
                 }
             }
         }
+        if (base.StartsWith("struct:") && g.structs.Has(base.Substring(7))) {
+            var fields2 = SplitAll(g.structs.Get(base.Substring(7)), ",");
+            for (var fi2 = 0; fi2 < fields2.Count; fi2++) {
+                if (fields2.Get(fi2) == m) {
+                    if (m == "kind" || m == "text" || m == "value") return "ptr";
+                    return "i64";
+                }
+            }
+        }
         if (baseNode.kind == "identifier" && locals.Has(baseNode.value) && locals.Get(baseNode.value).StartsWith("struct:")) {
             if (m == "kind" || m == "text" || m == "value") return "ptr";
             return "i64";
+        }
+        if (baseNode.kind == "identifier" && locals.Has(baseNode.value) && locals.Get(baseNode.value) == "i64") {
+            var found = FindStructWithField(g, m);
+            if (found != "") {
+                var pidx = ParamIndex(g, fnName, baseNode.value);
+                locals.Set(baseNode.value, "struct:" + found);
+                if (pidx >= 0) { SigSetParam(g, fnName, pidx, "struct:" + found); }
+                if (m == "kind" || m == "text" || m == "value") return "ptr";
+                return "i64";
+            }
+        }
+        if (baseNode.kind == "member") {
+            var innerBase = Child(arena, baseNode, 0);
+            var innerM = baseNode.value;
+            if (innerBase.kind == "identifier" && locals.Has(innerBase.value) && locals.Get(innerBase.value).StartsWith("struct:")) {
+                return "i64";
+            }
         }
         if (baseNode.kind == "identifier" && (m == "Length" || m == "Substring" ||
             m == "Contains" || m == "StartsWith" || m == "EndsWith" ||
@@ -1903,6 +1951,9 @@ var InferExprType(g, e, arena, locals, fnName) {
                 if (m == "println" || m == "print" || m == "exit" || m == "stop") return "void";
             }
             var bt = InferExprType(g, base, arena, locals, fnName);
+            if (base.kind == "identifier" && m == "Get" && g.listElem.Has(base.value)) {
+                return "struct:" + g.listElem.Get(base.value);
+            }
             if (base.kind == "call") {
                 var innerCallee = Child(arena, base, 0);
                 if (innerCallee.kind == "identifier") {
@@ -1957,7 +2008,21 @@ var InferExprType(g, e, arena, locals, fnName) {
 var InferStmt(g, s, arena, locals, fnName) {
     if (s.kind == "vardecl") {
         var name = Child(arena, s, 0).value;
-        locals.Set(name, InferExprType(g, Child(arena, s, 1), arena, locals, fnName));
+        var rhs = Child(arena, s, 1);
+        if (rhs.kind == "structinit") {
+            locals.Set(name, "struct:" + rhs.value);
+            return 0;
+        }
+        if (rhs.kind == "call") {
+            var rc = Child(arena, rhs, 0);
+            if (rc.kind == "identifier" && rc.value == "List" && rhs.children.Count > 1) {
+                var ta = Child(arena, rhs, 1);
+                if (ta.kind == "typearg" && g.structs.Has(ta.value)) {
+                    g.listElem.Set(name, ta.value);
+                }
+            }
+        }
+        locals.Set(name, InferExprType(g, rhs, arena, locals, fnName));
         return 0;
     }
     if (s.kind == "expr") { InferExprType(g, Child(arena, s, 0), arena, locals, fnName); return 0; }
@@ -2048,6 +2113,7 @@ struct IR {
     var ln = Map<string, string>();
     var structs = Map<string, string>();
     var structVars = List<string>();
+    var listElem = Map<string, string>();
     var curFnRet = "";
     var curFnName = "";
     var sigs = Map<string, string>();
@@ -2061,7 +2127,7 @@ var NewIR() {
     var lc = List<int>(); lc.Add(0);
     var terminated = List<int>(); terminated.Add(0);
     return IR { lines = List<string>(), strs = Map<string, string>(), pending = List<string>(), sc = sc, lc = lc,
-                lt = Map<string, string>(), ln = Map<string, string>(), structs = Map<string, string>(), structVars = List<string>(), curFnRet = "", curFnName = "", sigs = Map<string, string>(), terminated = terminated, breakTargets = List<string>(), continueTargets = List<string>() };
+                lt = Map<string, string>(), ln = Map<string, string>(), structs = Map<string, string>(), structVars = List<string>(), listElem = Map<string, string>(), curFnRet = "", curFnName = "", sigs = Map<string, string>(), terminated = terminated, breakTargets = List<string>(), continueTargets = List<string>() };
 }
 
 var Emit(g, s) {
@@ -2131,6 +2197,7 @@ var EmitDecls(g) {
     Emit(g, "declare i64 @kx_system(ptr)");
     Emit(g, "declare void @kx_exit(i32)");
     Emit(g, "declare void @kx_panic(ptr)");
+    Emit(g, "declare ptr @kx_readln()");
     Emit(g, "declare void @kx_save_args(i32, ptr)");
     Emit(g, "declare i64 @kx_args(i64)");
     Emit(g, "declare i64 @kx_list_new(i32)");
@@ -2463,6 +2530,17 @@ var GenExpr(g, e, arena) {
                 var returned = SigRet(g.sigs.Get(innerCallee.value));
                 if (returned.StartsWith("struct:")) structName = returned.Substring(7);
             }
+        } else if (baseExpr.kind == "member") {
+            var walk = baseExpr;
+            var depth = 0;
+            while (walk.kind == "member" && depth < 16) {
+                walk = Child(arena, walk, 0);
+                depth++;
+            }
+            if (walk.kind == "identifier" && g.lt.Has(walk.value)) {
+                var varType = g.lt.Get(walk.value);
+                if (varType.StartsWith("struct:")) structName = varType.Substring(7);
+            }
         }
         if (structName != "" && g.structs.Has(structName)) {
             var fields = SplitAll(g.structs.Get(structName), ",");
@@ -2500,6 +2578,23 @@ var GenExpr(g, e, arena) {
                             Emit(g, "  " + r + " = call i64 @kx_struct_get(i64 " + bv + ", i32 " + IntStr(fidx) + ")");
                             return "i64 " + r;
                         }
+                    }
+                }
+            }
+            var guessStruct = FindStructWithField(g, m);
+            if (guessStruct != "" && g.structs.Has(guessStruct)) {
+                var gfields = SplitAll(g.structs.Get(guessStruct), ",");
+                if (gfields.Get(0) == "") gfields = List<string>();
+                for (var gi = 0; gi < gfields.Count; gi++) {
+                    if (gfields.Get(gi) == m) {
+                        var gr = "%" + Lbl(g, "r");
+                        Emit(g, "  " + gr + " = call i64 @kx_struct_get(i64 " + bv + ", i32 " + IntStr(gi) + ")");
+                        if (m == "kind" || m == "text" || m == "value") {
+                            var gp = "%" + Lbl(g, "field");
+                            Emit(g, "  " + gp + " = inttoptr i64 " + gr + " to ptr");
+                            return "ptr " + gp;
+                        }
+                        return "i64 " + gr;
                     }
                 }
             }
@@ -2597,6 +2692,9 @@ var GenExpr(g, e, arena) {
                 } else {
                     Emit(g, "  " + r + " = call i64 @kx_list_get(i64 " + bv + ", i64 " + ToI64(g, a) + ")");
                 }
+                if (base.kind == "identifier" && g.listElem.Has(base.value)) {
+                    return "struct:" + g.listElem.Get(base.value) + " " + r;
+                }
                 return "i64 " + r;
             }
             if (m == "Set") {
@@ -2656,7 +2754,9 @@ var GenExpr(g, e, arena) {
                 return "i64 " + r;
             }
             if (m == "Substring") {
+                if (e.children.Count < 2) { return "ptr " + GetStr(g, ""); }
                 var a1 = GenExpr(g, Child(arena, e, 1), arena);
+                if (e.children.Count < 3) { return "ptr " + GetStr(g, ""); }
                 var a2 = GenExpr(g, Child(arena, e, 2), arena);
                 var bv2 = bv;
                 if (bt == "i64") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + bv + " to ptr"); bv2 = ext; }
@@ -2726,12 +2826,41 @@ var GenExpr(g, e, arena) {
             }
             if (callee.value == "List") {
                 var r = "%" + Lbl(g, "r");
-                Emit(g, "  " + r + " = call i64 @kx_list_new(i32 0)");
+                var elemKind = 0;
+                if (e.children.Count > 0) {
+                    var ta = Child(arena, e, 1);
+                    if (ta.kind == "typearg") {
+                        var tn = ta.value;
+                        if (tn == "string") { elemKind = 2; }
+                        else if (tn == "double" || tn == "float") { elemKind = 1; }
+                        else if (tn == "int" || tn == "long" || tn == "bool" || tn == "byte") { elemKind = 0; }
+                        else { elemKind = 3; }
+                    }
+                }
+                Emit(g, "  " + r + " = call i64 @kx_list_new(i32 " + IntStr(elemKind) + ")");
                 return "i64 " + r;
             }
             if (callee.value == "Map") {
                 var r = "%" + Lbl(g, "r");
-                Emit(g, "  " + r + " = call i64 @kx_map_new(i32 0, i32 0)");
+                var keyKind = 0;
+                var valKind = 0;
+                if (e.children.Count > 1) {
+                    var tk = Child(arena, e, 1);
+                    var tv = Child(arena, e, 2);
+                    if (tk.kind == "typearg") {
+                        var kn = tk.value;
+                        if (kn == "string") { keyKind = 2; }
+                        else if (kn == "double" || kn == "float") { keyKind = 1; }
+                        else { keyKind = 3; }
+                    }
+                    if (tv.kind == "typearg") {
+                        var vn = tv.value;
+                        if (vn == "string") { valKind = 2; }
+                        else if (vn == "double" || vn == "float") { valKind = 1; }
+                        else { valKind = 3; }
+                    }
+                }
+                Emit(g, "  " + r + " = call i64 @kx_map_new(i32 " + IntStr(keyKind) + ", i32 " + IntStr(valKind) + ")");
                 return "i64 " + r;
             }
             if (callee.value == "panic") {
@@ -2775,6 +2904,9 @@ var GenExpr(g, e, arena) {
                 return "void 0";
             }
             Emit(g, "  " + r + " = call " + callRetIR + " @" + callee.value + "(" + argStr + ")");
+            if (callRet.StartsWith("struct:")) {
+                return callRet + " " + r;
+            }
             return callRetIR + " " + r;
         }
          return "i64 0";
@@ -2803,6 +2935,50 @@ var GenExpr(g, e, arena) {
     if (e.kind == "assign") {
         var rhs = GenExpr(g, Child(arena, e, 1), arena);
         var lhs = Child(arena, e, 0);
+        var asOp = e.value;
+        if (asOp != "assign" && lhs.kind == "identifier" && g.ln.Has(lhs.value)) {
+            var lhsType = g.lt.Get(lhs.value);
+            var rhsType = XType(rhs);
+            var rhsVal = XVal(rhs);
+            if (lhsType == "ptr" || rhsType == "ptr") {
+                var cur = "%" + Lbl(g, "cur");
+                Emit(g, "  " + cur + " = load ptr, ptr " + g.ln.Get(lhs.value));
+                var rv2 = rhsVal;
+                if (rhsType != "ptr") {
+                    var ext2 = "%" + Lbl(g, "ext");
+                    Emit(g, "  " + ext2 + " = call ptr @kx_int_str(" + rhsType + " " + rhsVal + ")");
+                    rv2 = ext2;
+                }
+                var cat = "%" + Lbl(g, "cat");
+                Emit(g, "  " + cat + " = call ptr @kx_str_cat(ptr " + cur + ", ptr " + rv2 + ")");
+                rhsVal = cat; rhsType = "ptr"; g.lt.Set(lhs.value, "ptr");
+            } else {
+                var lt = lhsType == "i64" ? "i64" : (lhsType == "i32" ? "i32" : "i64");
+                var cur = "%" + Lbl(g, "cur");
+                Emit(g, "  " + cur + " = load " + lt + ", ptr " + g.ln.Get(lhs.value));
+                var rv = rhsVal;
+                if (lt != rhsType) {
+                    var ext = "%" + Lbl(g, "ext");
+                    Emit(g, "  " + ext + " = sext i32 " + rhsVal + " to i64");
+                    rv = ext;
+                    if (lt == "i32") {
+                        var tr = "%" + Lbl(g, "tr");
+                        Emit(g, "  " + tr + " = trunc i64 " + rv + " to i32");
+                        rv = tr;
+                    }
+                }
+                var op = "add";
+                if (asOp == "subassign") op = "sub";
+                else if (asOp == "mulassign") op = "mul";
+                else if (asOp == "divassign") op = "sdiv";
+                else if (asOp == "modassign") op = "srem";
+                var res = "%" + Lbl(g, "as");
+                Emit(g, "  " + res + " = " + op + " " + lt + " " + cur + ", " + rv);
+                rhsVal = res; rhsType = lt;
+            }
+            Emit(g, "  store " + rhsType + " " + rhsVal + ", ptr " + g.ln.Get(lhs.value));
+            return rhsType + " " + rhsVal;
+        }
         if (lhs.kind == "identifier" && g.ln.Has(lhs.value)) {
             var lhsType = g.lt.Get(lhs.value);
             var rhsType = XType(rhs);
@@ -2842,7 +3018,7 @@ var GenStmt(g, s, arena) {
         var rhs = GenExpr(g, Child(arena, s, 1), arena);
         var rt = XType(rhs);
         var rv = XVal(rhs);
-        var uniqueNm = nm + "." + IntStr(g.lc.Get(0));
+        var uniqueNm = Lbl(g, nm);
         g.lc.Set(0, g.lc.Get(0) + 1);
         if (Child(arena, s, 1).kind == "structinit") {
             var structName = Child(arena, s, 1).value;
@@ -2854,6 +3030,14 @@ var GenStmt(g, s, arena) {
                 return 0;
             }
         }
+        if (rt.StartsWith("struct:")) {
+            Emit(g, "  %" + uniqueNm + " = alloca i64");
+            Emit(g, "  store i64 " + rv + ", ptr %" + uniqueNm);
+            g.lt.Set(nm, rt);
+            g.ln.Set(nm, "%" + uniqueNm);
+            return 0;
+        }
+        if (rt == "void") { rt = "i64"; rv = "0"; }
         Emit(g, "  %" + uniqueNm + " = alloca " + rt);
         Emit(g, "  store " + rt + " " + rv + ", ptr %" + uniqueNm);
         g.lt.Set(nm, rt); g.ln.Set(nm, "%" + uniqueNm);
@@ -2881,6 +3065,12 @@ var GenStmt(g, s, arena) {
                 var ext = "%" + Lbl(g, "ext");
                 Emit(g, "  " + ext + " = inttoptr i64 " + vv + " to ptr");
                 vv = ext; vt = "ptr";
+            }
+            if (vt.StartsWith("struct:")) { vt = "i64"; }
+            if (vt != g.curFnRet && vt == "i32") {
+                var ext2 = "%" + Lbl(g, "ext");
+                Emit(g, "  " + ext2 + " = sext i32 " + vv + " to i64");
+                vv = ext2; vt = "i64";
             }
             Emit(g, "  ret " + vt + " " + vv);
         } else { Emit(g, "  ret void"); }
@@ -2980,6 +3170,11 @@ var GenStmt(g, s, arena) {
         var varNm = Child(arena, s, 0).value;
         var container = GenExpr(g, Child(arena, s, 1), arena);
         var cv = XVal(container);
+        if (XType(container) == "ptr") {
+            var cvc = "%" + Lbl(g, "c");
+            Emit(g, "  " + cvc + " = ptrtoint ptr " + cv + " to i64");
+            cv = cvc;
+        }
         var idxVar = "%" + Lbl(g, "fe.idx");
         var elemVar = "%" + Lbl(g, "fe.elem");
         Emit(g, "  " + elemVar + " = alloca i64");
@@ -3116,6 +3311,10 @@ var GenFunc(g, decl, arena) {
         Emit(g, "  store " + pType + " %" + p + ", ptr " + allocaNm);
         g.lt.Set(p, pType); g.ln.Set(p, allocaNm);
     }
+    for (var i = 0; i < params.Count; i++) {
+        var sem = sigParams.Get(i);
+        if (sem.StartsWith("struct:")) { g.lt.Set(params.Get(i), sem); }
+    }
     GenStmt(g, Child(arena, decl, decl.children.Count - 1), arena);
     if (ret == "void") {
         Emit(g, "  ret void");
@@ -3136,21 +3335,36 @@ var GenFunc(g, decl, arena) {
 
 int main() {
     var args = std.args();
-    if (args.Count < 2) { std.println("usage: codegen <input.kx> <output.ll>"); return 1; }
-    var src = std.readFile(args.Get(0));
-    var content = "";
-    if (src is string s) { content = s; } else { std.println("cannot read file"); return 1; }
+    if (args.Count < 3) { std.println("usage: codegen <input.kx> <output.ll>"); return 1; }
+    var src = std.readFile(args.Get(1));
+    var content = src;
     var tokens = LexAll(content);
     var pos = List<int>(); pos.Add(0);
     var arena = List<AstNode>();
     var errors = List<string>();
-    var rootIdx = ParseProgram(tokens, pos, arena, errors, args.Get(0));
+    var rootIdx = ParseProgram(tokens, pos, arena, errors, args.Get(1));
     if (errors.Count > 0) { foreach (var e in errors) { std.println(e); } return 1; }
     var root = arena.Get(rootIdx);
     var g = NewIR();
     Emit(g, "target triple = \"x86_64-unknown-linux-gnu\"");
     Emit(g, "");
     EmitDecls(g);
+    for (var i = 0; i < root.children.Count; i++) {
+        var d = Child(arena, root, i);
+        if (d.kind == "struct") {
+            var name = Child(arena, d, 0).value;
+            var fieldStr = "";
+            for (var fi = 1; fi < d.children.Count; fi++) {
+                var f = Child(arena, d, fi);
+                if (f.kind == "field") {
+                    if (fieldStr != "") fieldStr += ",";
+                    fieldStr += f.value;
+                }
+            }
+            g.structs.Set(name, fieldStr);
+            g.structVars.Add(name);
+        }
+    }
     InferSignatures(g, root, arena);
     for (var i = 0; i < root.children.Count; i++) {
         var d = Child(arena, root, i);
@@ -3165,6 +3379,7 @@ int main() {
                 }
             }
             g.structs.Set(name, fieldStr);
+            g.structVars.Add(name);
         }
         if (d.kind == "function") GenFunc(g, d, arena);
         if (d.kind == "extern") {
@@ -3184,6 +3399,6 @@ int main() {
             Emit(g, "declare " + irRet + " @" + name + "(" + irP + ")");
         }
     }
-    var out = ""; for (var i = 0; i < g.lines.Count; i++) { out += g.lines.Get(i) + "\n"; } for (var pi = 0; pi < g.pending.Count; pi++) { out += g.pending.Get(pi) + "\n"; } std.writeFile(args.Get(1), out);
+    var out = ""; for (var i = 0; i < g.lines.Count; i++) { out += g.lines.Get(i) + "\n"; } for (var pi = 0; pi < g.pending.Count; pi++) { out += g.pending.Get(pi) + "\n"; } std.writeFile(args.Get(2), out);
     return 0;
 }

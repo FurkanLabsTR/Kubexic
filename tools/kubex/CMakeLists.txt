@@ -9,5 +9,12 @@ add_executable(kubex
   auth_manager.cpp
   registry_client.cpp
   archive_build.cpp
+  signing.cpp
+  lockfile.cpp
+  sbom.cpp
+  audit.cpp
 )
 target_compile_features(kubex PRIVATE cxx_std_17)
+
+find_package(OpenSSL REQUIRED)
+target_link_libraries(kubex PRIVATE OpenSSL::Crypto)

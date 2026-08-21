@@ -1,0 +1,264 @@
+// codegen.kx — LLVM C API code generation, written in Kubexic.
+// Generates native code using LLVM C API via extern declarations.
+
+// LLVM C API bindings
+extern void* LLVMModuleCreateWithName(const char* name);
+extern void LLVMDisposeModule(void* m);
+extern void LLVMSetTarget(void* m, const char* triple);
+extern void* LLVMInt32Type();
+extern void* LLVMInt64Type();
+extern void* LLVMDoubleType();
+extern void* LLVMVoidType();
+extern void* LLVMFunctionType(void* retTy, void* paramTypes, int paramCount, int isVarArg);
+extern void* LLVMAddFunction(void* m, const char* name, void* fnTy);
+extern void* LLVMAppendBasicBlock(void* fn, const char* name);
+extern void* LLVMCreateBuilder();
+extern void LLVMPositionBuilderAtEnd(void* builder, void* block);
+extern void* LLVMBuildAlloca(void* builder, void* ty, const char* name);
+extern void* LLVMBuildStore(void* builder, void* val, void* ptr);
+extern void* LLVMBuildLoad(void* builder, void* ty, void* ptr, const char* name);
+extern void* LLVMBuildAdd(void* builder, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildSub(void* builder, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildMul(void* builder, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildSDiv(void* builder, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildRet(void* builder, void* val);
+extern void* LLVMBuildRetVoid(void* builder);
+extern void* LLVMBuildBr(void* builder, void* dest);
+extern void* LLVMBuildCondBr(void* builder, void* cond, void* then, void* otherwise);
+extern void* LLVMBuildICmp(void* builder, int pred, void* lhs, void* rhs, const char* name);
+extern void* LLVMBuildCall(void* builder, void* fn, void* args, int argCount, const char* name);
+extern void* LLVMBuildGlobalStringPtr(void* builder, const char* str, const char* name);
+extern void* LLVMConstInt(void* ty, long long val, int signExtend);
+extern void* LLVMConstReal(void* ty, double val);
+extern int LLVMVerifyModule(void* m, int action, char** errorMessage);
+extern int kx_llvm_emit_object(void* m, const char* triple, const char* outpath);
+
+struct CodegenContext {
+    var module = "";
+    var builder = "";
+    var functions = Map<string, void*>();
+    var variables = Map<string, void*>();
+    var currentFunc = "";
+    var errors = List<string>();
+}
+
+void ReportError(ctx, msg) {
+    ctx.errors.Add(msg);
+}
+
+/* ---------------- type generation ---------------- */
+
+var GenType(typeName) {
+    if (typeName == "int" || typeName == "long") {
+        return LLVMInt64Type();
+    }
+    if (typeName == "float" || typeName == "double") {
+        return LLVMDoubleType();
+    }
+    if (typeName == "bool") {
+        return LLVMInt32Type();
+    }
+    if (typeName == "void") {
+        return LLVMVoidType();
+    }
+    return LLVMInt64Type();  // default to i64
+}
+
+/* ---------------- expression codegen ---------------- */
+
+var GenExpr(ctx, arena, nodeIdx) {
+    var n = Node(arena, nodeIdx);
+    if (n.kind == "int") {
+        return LLVMConstInt(LLVMInt64Type(), std.parseInt(n.value), 0);
+    }
+    if (n.kind == "float") {
+        return LLVMConstReal(LLVMDoubleType(), std.parseDouble(n.value));
+    }
+    if (n.kind == "bool") {
+        var val = n.value == "true" ? 1 : 0;
+        return LLVMConstInt(LLVMInt32Type(), val, 0);
+    }
+    if (n.kind == "string") {
+        return LLVMBuildGlobalStringPtr(ctx.builder, n.value, "str");
+    }
+    if (n.kind == "identifier") {
+        if (ctx.variables.Has(n.value)) {
+            return ctx.variables.Get(n.value);
+        }
+        ReportError(ctx, $"undefined variable: {n.value}");
+        return "";
+    }
+    if (n.kind == "binary") {
+        if (n.children.Count < 2) {
+            ReportError(ctx, "binary operator needs two operands");
+            return "";
+        }
+        var lhs = GenExpr(ctx, arena, n.children.Get(0));
+        var rhs = GenExpr(ctx, arena, n.children.Get(1));
+        if (n.value == "+") {
+            return LLVMBuildAdd(ctx.builder, lhs, rhs, "add");
+        }
+        if (n.value == "-") {
+            return LLVMBuildSub(ctx.builder, lhs, rhs, "sub");
+        }
+        if (n.value == "*") {
+            return LLVMBuildMul(ctx.builder, lhs, rhs, "mul");
+        }
+        if (n.value == "/") {
+            return LLVMBuildSDiv(ctx.builder, lhs, rhs, "div");
+        }
+        if (n.value == "==" || n.value == "!=" ||
+            n.value == "<" || n.value == ">" ||
+            n.value == "<=" || n.value == ">=") {
+            // Would need to determine signed/unsigned comparison
+            return LLVMBuildICmp(ctx.builder, 32, lhs, rhs, "cmp");  // SLT
+        }
+    }
+    if (n.kind == "call") {
+        // Would need to look up function and generate call
+        ReportError(ctx, $"call not yet implemented: {n.value}");
+        return "";
+    }
+    ReportError(ctx, $"cannot generate code for {n.kind}");
+    return "";
+}
+
+/* ---------------- statement codegen ---------------- */
+
+void GenStmt(ctx, arena, stmtIdx) {
+    var n = Node(arena, stmtIdx);
+    if (n.kind == "return") {
+        if (n.children.Count > 0) {
+            var val = GenExpr(ctx, arena, n.children.Get(0));
+            LLVMBuildRet(ctx.builder, val);
+        } else {
+            LLVMBuildRetVoid(ctx.builder);
+        }
+    } else if (n.kind == "vardecl") {
+        var ty = LLVMInt64Type();  // simplified - would need type inference
+        var alloca = LLVMBuildAlloca(ctx.builder, ty, n.value);
+        if (n.children.Count > 0) {
+            var val = GenExpr(ctx, arena, n.children.Get(0));
+            LLVMBuildStore(ctx.builder, val, alloca);
+        }
+        ctx.variables.Set(n.value, alloca);
+    } else if (n.kind == "block") {
+        for (var i = 0; i < n.children.Count; i++) {
+            GenStmt(ctx, arena, n.children.Get(i));
+        }
+    } else if (n.kind == "if") {
+        // Simplified if codegen
+        if (n.children.Count >= 2) {
+            var cond = GenExpr(ctx, arena, n.children.Get(0));
+            // Would need to create basic blocks and conditional branch
+        }
+    } else if (n.kind == "while") {
+        // Simplified while codegen
+    }
+}
+
+/* ---------------- declaration codegen ---------------- */
+
+void GenFunction(ctx, arena, declIdx) {
+    var n = Node(arena, declIdx);
+    var retType = LLVMInt64Type();  // default
+    var paramCount = 0;
+    // Count parameters (skip rettype and body)
+    for (var i = 0; i < n.children.Count; i++) {
+        var child = Node(arena, n.children.Get(i));
+        if (child.kind == "param") {
+            paramCount++;
+        }
+    }
+    var paramTypes = List<void*>();
+    for (var i = 0; i < paramCount; i++) {
+        paramTypes.Add(LLVMInt64Type());
+    }
+    var fnType = LLVMFunctionType(retType, "", 0, 0);  // simplified
+    var fn = LLVMAddFunction(ctx.module, n.value, fnType);
+    ctx.functions.Set(n.value, fn);
+    // Generate body
+    for (var i = 0; i < n.children.Count; i++) {
+        var child = Node(arena, n.children.Get(i));
+        if (child.kind == "block") {
+            var block = LLVMAppendBasicBlock(fn, "entry");
+            ctx.builder = LLVMCreateBuilder();
+            LLVMPositionBuilderAtEnd(ctx.builder, block);
+            ctx.currentFunc = n.value;
+            GenStmt(ctx, arena, n.children.Get(i));
+        }
+    }
+}
+
+void GenComponent(ctx, arena, declIdx) {
+    // Component codegen would generate runtime structures
+    // For now, just record the component
+}
+
+void GenSystem(ctx, arena, declIdx) {
+    // System codegen would generate iteration and match-set filtering
+    // For now, just record the system
+}
+
+/* ---------------- program codegen ---------------- */
+
+void GenProgram(ctx, arena, progIdx) {
+    var n = Node(arena, progIdx);
+    for (var i = 0; i < n.children.Count; i++) {
+        var child = Node(arena, n.children.Get(i));
+        if (child.kind == "function") {
+            GenFunction(ctx, arena, n.children.Get(i));
+        } else if (child.kind == "component") {
+            GenComponent(ctx, arena, n.children.Get(i));
+        } else if (child.kind == "system") {
+            GenSystem(ctx, arena, n.children.Get(i));
+        }
+    }
+}
+
+/* ---------------- main ---------------- */
+
+int main() {
+    var args = std.args();
+    if (args.Count < 3) {
+        std.println("usage: codegen <input.kx> <output.o>");
+        return 1;
+    }
+    var inputFile = args.Get(1);
+    var outputFile = args.Get(2);
+    var src = std.readFile(inputFile);
+    if (src == "") {
+        std.println($"error: could not read {inputFile}");
+        return 1;
+    }
+    // Lex
+    var tokens = LexAll(src);
+    // Parse
+    var arena = List<AstNode>();
+    var parseErrors = List<string>();
+    var program = ParseProgram(tokens, arena, parseErrors);
+    if (parseErrors.Count > 0) {
+        for (var i = 0; i < parseErrors.Count; i++) {
+            std.println(parseErrors.Get(i));
+        }
+        return 1;
+    }
+    // Codegen
+    var ctx = CodegenContext {};
+    ctx.module = LLVMModuleCreateWithName("main");
+    LLVMSetTarget(ctx.module, "x86_64-unknown-linux-gnu");
+    GenProgram(ctx, arena, program);
+    if (ctx.errors.Count > 0) {
+        for (var i = 0; i < ctx.errors.Count; i++) {
+            std.println(ctx.errors.Get(i));
+        }
+        return 1;
+    }
+    // Emit object file
+    if (kx_llvm_emit_object(ctx.module, "x86_64-unknown-linux-gnu", outputFile) == 0) {
+        std.println("error: failed to emit object file");
+        return 1;
+    }
+    std.println($"generated {outputFile}");
+    return 0;
+}

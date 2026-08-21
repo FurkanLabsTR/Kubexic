@@ -734,7 +734,21 @@ Decl Parser::parseFunction() {
     if (!match(TokenKind::Comma)) break;
   }
   expect(TokenKind::RParen, "')' after parameters");
-  d.body = parseBlock();
+  if (match(TokenKind::Arrow)) {
+    auto expr = parseExpression();
+    expect(TokenKind::Semi, "';' after expression body");
+    auto block = std::make_unique<Stmt>();
+    block->kind = Stmt::Kind::Block;
+    block->loc = expr->loc;
+    auto ret = std::make_unique<Stmt>();
+    ret->kind = Stmt::Kind::Return;
+    ret->loc = expr->loc;
+    ret->value = std::move(expr);
+    block->body.push_back(std::move(ret));
+    d.body = std::move(block);
+  } else {
+    d.body = parseBlock();
+  }
   return d;
 }
 

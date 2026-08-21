@@ -48,6 +48,11 @@ std::string registryGetPackageVersion(const std::string& name, const std::string
 bool registryPublish(const std::string& name, const std::string& version,
                      const std::string& archivePath);
 
+// Publish a package with signature (auth required)
+bool registryPublishSigned(const std::string& name, const std::string& version,
+                           const std::string& archivePath, const std::string& signature,
+                           const std::string& publicKey);
+
 // Download a package
 bool registryDownload(const std::string& name, const std::string& version,
                       const std::string& destPath);

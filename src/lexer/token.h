@@ -93,6 +93,7 @@ enum class TokenKind {
   PercentEq,
   PlusPlus,
   MinusMinus,
+  Arrow,
 };
 
 struct Token {

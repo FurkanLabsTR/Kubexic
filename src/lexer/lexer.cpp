@@ -139,6 +139,7 @@ const char* tokenKindName(TokenKind kind) {
     case TokenKind::PercentEq: return "'%='";
     case TokenKind::PlusPlus: return "'++'";
     case TokenKind::MinusMinus: return "'--'";
+    case TokenKind::Arrow: return "'->'";
   }
   return "unknown";
 }
@@ -355,6 +356,7 @@ Token Lexer::next() {
       advance();
       if (peek() == '-') { advance(); return makeToken(TokenKind::MinusMinus, col_ - 2); }
       if (peek() == '=') { advance(); return makeToken(TokenKind::MinusEq, col_ - 2); }
+      if (peek() == '>') { advance(); return makeToken(TokenKind::Arrow, col_ - 2); }
       return makeToken(TokenKind::Minus, col_ - 1);
     case '*':
       advance();

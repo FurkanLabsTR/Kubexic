@@ -1,0 +1,287 @@
+// checker.kx — semantic analysis for the Kubexic compiler, written in Kubexic.
+// Handles type inference, name resolution, and basic type checking.
+
+struct Symbol {
+    var name = "";
+    var kind = "";  // "component", "system", "tag", "function", "variable", "struct"
+    var retType = "";
+    var fields = Map<string, string>();
+    var params = List<string>();
+}
+
+struct CheckContext {
+    var symbols = Map<string, Symbol>();
+    var errors = List<string>();
+    var inSystem = false;
+    var currentFunc = "";
+}
+
+var LookupSymbol(ctx, name) {
+    return ctx.symbols.Get(name);
+}
+
+var HasSymbol(ctx, name) {
+    return ctx.symbols.Has(name);
+}
+
+void AddSymbol(ctx, sym) {
+    ctx.symbols.Set(sym.name, sym);
+}
+
+void ReportError(ctx, msg) {
+    ctx.errors.Add(msg);
+}
+
+/* ---------------- type inference ---------------- */
+
+var InferType(ctx, nodeKind, nodeValue) {
+    if (nodeKind == "int") {
+        return "int";
+    }
+    if (nodeKind == "float") {
+        return "double";
+    }
+    if (nodeKind == "string") {
+        return "string";
+    }
+    if (nodeKind == "bool") {
+        return "bool";
+    }
+    if (nodeKind == "identifier") {
+        if (HasSymbol(ctx, nodeValue)) {
+            var sym = LookupSymbol(ctx, nodeValue);
+            if (sym.kind == "component") {
+                return "component";
+            }
+            if (sym.kind == "function") {
+                return sym.retType;
+            }
+            if (sym.kind == "variable") {
+                return sym.retType;
+            }
+        }
+        return "unknown";
+    }
+    if (nodeKind == "binary") {
+        if (nodeValue == "==" || nodeValue == "!=" ||
+            nodeValue == "<" || nodeValue == ">" ||
+            nodeValue == "<=" || nodeValue == ">=" ||
+            nodeValue == "&&" || nodeValue == "||") {
+            return "bool";
+        }
+        if (nodeValue == "+" || nodeValue == "-" ||
+            nodeValue == "*" || nodeValue == "/" || nodeValue == "%") {
+            return "int";  // simplified - would need operand type checking
+        }
+    }
+    return "unknown";
+}
+
+/* ---------------- declaration checking ---------------- */
+
+void CheckComponent(ctx, arena, nodeIdx) {
+    var n = Node(arena, nodeIdx);
+    var sym = Symbol { name = n.value, kind = "component" };
+    // Check fields
+    for (var i = 0; i < n.children.Count; i++) {
+        var child = Node(arena, n.children.Get(i));
+        if (child.kind == "field") {
+            sym.fields.Set(child.value, "int");  // simplified type inference
+        }
+    }
+    if (HasSymbol(ctx, n.value)) {
+        ReportError(ctx, $"duplicate declaration: {n.value}");
+    } else {
+        AddSymbol(ctx, sym);
+    }
+}
+
+void CheckSystem(ctx, arena, nodeIdx) {
+    var n = Node(arena, nodeIdx);
+    var sym = Symbol { name = n.value, kind = "system" };
+    if (HasSymbol(ctx, n.value)) {
+        ReportError(ctx, $"duplicate declaration: {n.value}");
+    } else {
+        AddSymbol(ctx, sym);
+    }
+    // Check system body
+    var savedInSystem = ctx.inSystem;
+    ctx.inSystem = true;
+    for (var i = 0; i < n.children.Count; i++) {
+        var child = Node(arena, n.children.Get(i));
+        if (child.kind == "block") {
+            CheckBlock(ctx, arena, n.children.Get(i));
+        }
+    }
+    ctx.inSystem = savedInSystem;
+}
+
+void CheckFunction(ctx, arena, nodeIdx) {
+    var n = Node(arena, nodeIdx);
+    var retType = "var";
+    if (n.children.Count > 0) {
+        var first = Node(arena, n.children.Get(0));
+        if (first.kind == "rettype") {
+            retType = first.value;
+        }
+    }
+    var sym = Symbol { name = n.value, kind = "function", retType = retType };
+    if (HasSymbol(ctx, n.value)) {
+        ReportError(ctx, $"duplicate declaration: {n.value}");
+    } else {
+        AddSymbol(ctx, sym);
+    }
+    // Check function body
+    var savedFunc = ctx.currentFunc;
+    ctx.currentFunc = n.value;
+    for (var i = 0; i < n.children.Count; i++) {
+        var child = Node(arena, n.children.Get(i));
+        if (child.kind == "block") {
+            CheckBlock(ctx, arena, n.children.Get(i));
+        }
+    }
+    ctx.currentFunc = savedFunc;
+}
+
+void CheckTag(ctx, arena, nodeIdx) {
+    var n = Node(arena, nodeIdx);
+    var sym = Symbol { name = n.value, kind = "tag" };
+    if (HasSymbol(ctx, n.value)) {
+        ReportError(ctx, $"duplicate declaration: {n.value}");
+    } else {
+        AddSymbol(ctx, sym);
+    }
+}
+
+void CheckStruct(ctx, arena, nodeIdx) {
+    var n = Node(arena, nodeIdx);
+    var sym = Symbol { name = n.value, kind = "struct" };
+    for (var i = 0; i < n.children.Count; i++) {
+        var child = Node(arena, n.children.Get(i));
+        if (child.kind == "field") {
+            sym.fields.Set(child.value, "int");
+        }
+    }
+    if (HasSymbol(ctx, n.value)) {
+        ReportError(ctx, $"duplicate declaration: {n.value}");
+    } else {
+        AddSymbol(ctx, sym);
+    }
+}
+
+/* ---------------- statement checking ---------------- */
+
+void CheckBlock(ctx, arena, nodeIdx) {
+    var n = Node(arena, nodeIdx);
+    for (var i = 0; i < n.children.Count; i++) {
+        CheckStatement(ctx, arena, n.children.Get(i));
+    }
+}
+
+void CheckStatement(ctx, arena, nodeIdx) {
+    var n = Node(arena, nodeIdx);
+    if (n.kind == "vardecl") {
+        var sym = Symbol { name = n.value, kind = "variable", retType = "var" };
+        if (n.children.Count > 0) {
+            var valType = InferType(ctx, Node(arena, n.children.Get(0)).kind,
+                                    Node(arena, n.children.Get(0)).value);
+            sym.retType = valType;
+        }
+        AddSymbol(ctx, sym);
+    } else if (n.kind == "block") {
+        CheckBlock(ctx, arena, nodeIdx);
+    } else if (n.kind == "if") {
+        if (n.children.Count > 0) {
+            CheckStatement(ctx, arena, n.children.Get(0));  // condition
+        }
+        if (n.children.Count > 1) {
+            CheckBlock(ctx, arena, n.children.Get(1));  // then block
+        }
+        if (n.children.Count > 2) {
+            CheckBlock(ctx, arena, n.children.Get(2));  // else block
+        }
+    } else if (n.kind == "while") {
+        if (n.children.Count > 0) {
+            CheckStatement(ctx, arena, n.children.Get(0));
+        }
+        if (n.children.Count > 1) {
+            CheckBlock(ctx, arena, n.children.Get(1));
+        }
+    } else if (n.kind == "return") {
+        // Check return expression if present
+        if (n.children.Count > 0) {
+            CheckExpression(ctx, arena, n.children.Get(0));
+        }
+    } else if (n.kind == "exprstmt") {
+        // Expression statement - check the expression
+        // (would need to track expression nodes)
+    }
+}
+
+void CheckExpression(ctx, arena, nodeIdx) {
+    var n = Node(arena, nodeIdx);
+    if (n.kind == "identifier") {
+        if (!HasSymbol(ctx, n.value)) {
+            ReportError(ctx, $"undefined identifier: {n.value}");
+        }
+    } else if (n.kind == "binary") {
+        if (n.children.Count >= 2) {
+            CheckExpression(ctx, arena, n.children.Get(0));
+            CheckExpression(ctx, arena, n.children.Get(1));
+        }
+    } else if (n.kind == "call") {
+        if (!HasSymbol(ctx, n.value)) {
+            ReportError(ctx, $"undefined function: {n.value}");
+        }
+        for (var i = 0; i < n.children.Count; i++) {
+            CheckExpression(ctx, arena, n.children.Get(i));
+        }
+    }
+}
+
+/* ---------------- program checking ---------------- */
+
+void CheckProgram(ctx, arena, nodeIdx) {
+    var n = Node(arena, nodeIdx);
+    // First pass: collect declarations
+    for (var i = 0; i < n.children.Count; i++) {
+        var child = Node(arena, n.children.Get(i));
+        if (child.kind == "component") {
+            CheckComponent(ctx, arena, n.children.Get(i));
+        } else if (child.kind == "system") {
+            CheckSystem(ctx, arena, n.children.Get(i));
+        } else if (child.kind == "function") {
+            CheckFunction(ctx, arena, n.children.Get(i));
+        } else if (child.kind == "tag") {
+            CheckTag(ctx, arena, n.children.Get(i));
+        } else if (child.kind == "struct") {
+            CheckStruct(ctx, arena, n.children.Get(i));
+        }
+    }
+    // Second pass: check function bodies
+    for (var i = 0; i < n.children.Count; i++) {
+        var child = Node(arena, n.children.Get(i));
+        if (child.kind == "function") {
+            CheckFunction(ctx, arena, n.children.Get(i));
+        }
+    }
+}
+
+/* ---------------- main ---------------- */
+
+int main() {
+    var args = std.args();
+    if (args.Count < 2) {
+        std.println("usage: checker <file.kx>");
+        return 1;
+    }
+    var src = std.readFile(args.Get(1));
+    if (src == "") {
+        std.println($"error: could not read {args.Get(1)}");
+        return 1;
+    }
+    // For now, this is a placeholder that would need the parser
+    std.println($"checking {args.Get(1)}...");
+    std.println("semantic analysis not yet fully implemented");
+    return 0;
+}

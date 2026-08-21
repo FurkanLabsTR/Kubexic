@@ -1,12 +1,16 @@
 #include "archive_build.h"
+#include "audit.h"
 #include "auth_manager.h"
 #include "build.h"
 #include "deps.h"
 #include "init.h"
 #include "kxconf.h"
+#include "lockfile.h"
 #include "project.h"
 #include "registry_client.h"
+#include "sbom.h"
 #include "semver.h"
+#include "signing.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -36,10 +40,14 @@ void printUsage() {
     << "  login           Login to registry\n"
     << "  register        Register a new account\n"
     << "  logout          Logout from registry\n"
-    << "  publish         Publish package to registry\n"
+    << "  publish         Publish package to registry (signs with Ed25519)\n"
     << "  search <query>  Search packages in registry\n"
     << "  install <pkg>   Install a package from registry\n"
     << "  info <pkg>      Show package info from registry\n"
+    << "  verify <pkg>    Verify package signature\n"
+    << "  keygen          Generate signing keypair\n"
+    << "  sbom            Generate SBOM (Software Bill of Materials)\n"
+    << "  audit           Scan dependencies for known vulnerabilities\n"
     << "  cache list      List cached packages\n"
     << "  cache clean     Remove all cached packages\n"
     << "  cache path      Show cache directory\n"
@@ -308,6 +316,119 @@ int cmdLogout() {
   return 0;
 }
 
+int cmdKeygen() {
+  kubex::AuthInfo auth = kubex::loadAuthToken();
+  std::string name = auth.username.empty() ? "default" : auth.username;
+
+  if (kubex::hasSigningKey(name)) {
+    std::cerr << "kubex: signing key already exists for '" << name << "'\n";
+    std::cerr << "  key location: " << kubex::keysDir() << "/" << name << "_ed25519\n";
+    return 1;
+  }
+
+  std::cout << "generating Ed25519 signing key for '" << name << "'...\n";
+  std::string pubKey = kubex::generateSigningKey(name);
+  if (pubKey.empty()) {
+    std::cerr << "kubex: failed to generate signing key\n";
+    return 1;
+  }
+
+  std::cout << "signing key generated:\n";
+  std::cout << "  private key: " << kubex::keysDir() << "/" << name << "_ed25519\n";
+  std::cout << "  public key:  " << pubKey << "\n";
+  std::cout << "\n  keep your private key secure! it is used to sign published packages.\n";
+  return 0;
+}
+
+int cmdVerify(const std::string& pkgSpec) {
+  std::string name = pkgSpec;
+  std::string version = "latest";
+  size_t at = pkgSpec.find('@');
+  if (at != std::string::npos) {
+    name = pkgSpec.substr(0, at);
+    version = pkgSpec.substr(at + 1);
+  }
+
+  std::cout << "fetching package info for " << name << "@" << version << "...\n";
+  std::string info = kubex::registryGetPackageVersion(name, version);
+  if (info.empty()) {
+    std::cerr << "kubex: failed to fetch package info\n";
+    return 1;
+  }
+
+  // Extract signature and public key from response
+  auto extract = [](const std::string& json, const std::string& key) -> std::string {
+    std::string search = "\"" + key + "\"";
+    size_t pos = json.find(search);
+    if (pos == std::string::npos) return "";
+    pos = json.find(':', pos + search.size());
+    if (pos == std::string::npos) return "";
+    pos++;
+    while (pos < json.size() && json[pos] == ' ') pos++;
+    if (pos >= json.size()) return "";
+    if (json[pos] == '"') {
+      pos++;
+      size_t end = pos;
+      while (end < json.size() && json[end] != '"') {
+        if (json[end] == '\\') end++;
+        end++;
+      }
+      return json.substr(pos, end - pos);
+    }
+    size_t end = pos;
+    while (end < json.size() && json[end] != ',' && json[end] != '}' && json[end] != '\n') end++;
+    return json.substr(pos, end - pos);
+  };
+
+  std::string signature = extract(info, "signature");
+  std::string publicKey = extract(info, "public_key");
+  std::string checksum = extract(info, "checksum");
+
+  if (signature.empty() || publicKey.empty()) {
+    std::cout << "package " << name << "@" << version << " is not signed\n";
+    std::cout << "  checksum: " << checksum << "\n";
+    return 0;
+  }
+
+  std::cout << "package " << name << "@" << version << " is signed\n";
+  std::cout << "  public key: " << publicKey << "\n";
+  std::cout << "  signature:  " << signature.substr(0, 16) << "...\n";
+  std::cout << "  checksum:   " << checksum << "\n";
+
+  // Download and verify
+  std::cout << "\ndownloading package for verification...\n";
+  std::string tmpArchive = "/tmp/kubex_verify_" + name + "_" + version + ".kxpkg";
+  if (!kubex::registryDownload(name, version, tmpArchive)) {
+    std::cerr << "kubex: failed to download package\n";
+    return 1;
+  }
+
+  // Compute checksum of downloaded archive
+  std::string computedChecksum = kubex::computeSha256(tmpArchive);
+  if (computedChecksum != checksum) {
+    std::cerr << "kubex: CHECKSUM MISMATCH!\n";
+    std::cerr << "  expected: " << checksum << "\n";
+    std::cerr << "  got:      " << computedChecksum << "\n";
+    std::remove(tmpArchive.c_str());
+    return 1;
+  }
+  std::cout << "  checksum verified\n";
+
+  // Verify signature
+  if (kubex::verifySignature(publicKey, computedChecksum, signature)) {
+    std::cout << "  signature verified\n";
+    std::cout << "\npackage is authentic\n";
+  } else {
+    std::cerr << "  SIGNATURE VERIFICATION FAILED!\n";
+    std::cerr << "\npackage may have been tampered with\n";
+    std::remove(tmpArchive.c_str());
+    return 1;
+  }
+
+  std::remove(tmpArchive.c_str());
+  return 0;
+}
+
 int cmdPublish() {
   auto project = kubex::findProject();
   if (!project.ok()) {
@@ -333,6 +454,15 @@ int cmdPublish() {
     return 1;
   }
 
+  kubex::AuthInfo auth = kubex::loadAuthToken();
+  std::string keyName = auth.username;
+
+  if (!kubex::hasSigningKey(keyName)) {
+    std::cerr << "kubex: no signing key found for '" << keyName << "'\n";
+    std::cerr << "  run 'kubex keygen' to generate a signing key\n";
+    return 1;
+  }
+
   std::cout << "building archive...\n";
   std::string archive = kubex::buildPackageArchive(project.root);
   if (archive.empty()) {
@@ -340,8 +470,20 @@ int cmdPublish() {
     return 1;
   }
 
-  std::cout << "publishing " << project.name << "@" << project.version << "...\n";
-  if (kubex::registryPublish(project.name, project.version, archive)) {
+  std::cout << "signing archive...\n";
+  std::string archiveChecksum = kubex::computeSha256(archive);
+  std::string privateKey = kubex::loadPrivateKey(keyName);
+  std::string signature = kubex::signData(privateKey, archiveChecksum);
+
+  // Load public key from file
+  std::string pubKeyPath = kubex::keysDir() + "/" + keyName + "_ed25519.pub";
+  std::ifstream pubIn(pubKeyPath);
+  std::string pubKeyPem((std::istreambuf_iterator<char>(pubIn)),
+                        std::istreambuf_iterator<char>());
+
+  std::cout << "publishing " << project.name << "@" << project.version << " (signed)...\n";
+  if (kubex::registryPublishSigned(project.name, project.version, archive,
+                                    signature, pubKeyPem)) {
     std::cout << "published " << project.name << "@" << project.version << "\n";
   } else {
     std::cerr << "kubex: publish failed\n";
@@ -350,6 +492,63 @@ int cmdPublish() {
   }
 
   std::remove(archive.c_str());
+  return 0;
+}
+
+int cmdSbom() {
+  auto project = kubex::findProject();
+  if (!project.ok()) {
+    for (const auto& e : project.conf.errors)
+      std::cerr << e.file << ":" << e.line << ": " << e.message << "\n";
+    return 1;
+  }
+
+  std::cout << "generating SBOM...\n";
+  kubex::Sbom sbom = kubex::generateSbom(project.root);
+  std::string sbomJson = kubex::sbomToJson(sbom);
+
+  std::string outputPath = project.root.string() + "/sbom.json";
+  if (kubex::saveSbom(outputPath, sbom)) {
+    std::cout << "SBOM saved to " << outputPath << "\n";
+    std::cout << "  packages: " << sbom.packages.size() << "\n";
+  } else {
+    std::cerr << "kubex: failed to save SBOM\n";
+    return 1;
+  }
+
+  return 0;
+}
+
+int cmdAudit() {
+  auto project = kubex::findProject();
+  if (!project.ok()) {
+    for (const auto& e : project.conf.errors)
+      std::cerr << e.file << ":" << e.line << ": " << e.message << "\n";
+    return 1;
+  }
+
+  std::cout << "scanning dependencies for vulnerabilities...\n";
+  kubex::AuditResult result = kubex::runAudit(project.root.string());
+
+  if (!result.success) {
+    std::cerr << "kubex: audit failed: " << result.errorMessage << "\n";
+    return 1;
+  }
+
+  if (result.vulnerabilities.empty()) {
+    std::cout << "no known vulnerabilities found\n";
+  } else {
+    std::cout << "found " << result.vulnerabilities.size() << " vulnerabilities:\n\n";
+    for (const auto& vuln : result.vulnerabilities) {
+      std::cout << "  " << vuln.id << "\n";
+      if (!vuln.severity.empty()) std::cout << "    severity: " << vuln.severity << "\n";
+      if (!vuln.summary.empty()) std::cout << "    " << vuln.summary << "\n";
+      if (!vuln.fixedVersion.empty()) std::cout << "    fix: upgrade to " << vuln.fixedVersion << "\n";
+      std::cout << "\n";
+    }
+    return 1;
+  }
+
   return 0;
 }
 
@@ -613,6 +812,26 @@ int main(int argc, char** argv) {
 
   if (cmd == "publish") {
     return cmdPublish();
+  }
+
+  if (cmd == "keygen") {
+    return cmdKeygen();
+  }
+
+  if (cmd == "verify") {
+    if (argc < 3) {
+      std::cerr << "usage: kubex verify <package[@version]>\n";
+      return 1;
+    }
+    return cmdVerify(argv[2]);
+  }
+
+  if (cmd == "sbom") {
+    return cmdSbom();
+  }
+
+  if (cmd == "audit") {
+    return cmdAudit();
   }
 
   if (cmd == "search") {

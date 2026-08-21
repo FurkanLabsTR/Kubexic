@@ -1,0 +1,24 @@
+// ast.kx — AST node types for the Kubexic compiler, written in Kubexic.
+
+struct AstNode {
+    var kind = "";
+    var value = "";
+    var line = 0;
+    var col = 0;
+    var children = List<int>();
+}
+
+var NewNode(arena, kind, value, line, col) {
+    arena.Add(AstNode { kind = kind, value = value, line = line, col = col,
+                        children = List<int>() });
+    return arena.Count - 1;
+}
+
+var Node(arena, i) {
+    return arena.Get(i);
+}
+
+void AddChild(arena, parent, child) {
+    var children = arena.Get(parent).children;
+    children.Add(child);
+}

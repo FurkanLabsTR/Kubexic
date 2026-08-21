@@ -214,6 +214,8 @@ void Codegen::declareEcsRuntime() {
   runtimeFn("kx_spatial_set_tag_mask", voidTy, {i64});
   runtimeFn("kx_spatial_query_begin", i64, {f64, f64, f64, f64});
   runtimeFn("kx_spatial_query_next", i64, {i64, f64, f64, f64, f64});
+  runtimeFn("malloc", ptr, {i64});
+  runtimeFn("kx_box_struct", i64, {i64, i64});
   runtimeFn("kx_spatial_query_count", i64, {f64, f64, f64, f64});
 }
 
@@ -412,6 +414,10 @@ void Codegen::emitInitCalls() {
   auto i64 = llvm::Type::getInt64Ty(ctx_);
   auto ptr = llvm::PointerType::get(ctx_, 0);
 
+  // Save argc/argv for runtime access
+  auto saveArgsFn = runtimeFn("kx_save_args", llvm::Type::getVoidTy(ctx_), {i32, ptr});
+  builder_.CreateCall(saveArgsFn, {&*curFn_->arg_begin(), &*std::next(curFn_->arg_begin())});
+
   std::vector<llvm::Constant*> counts;
   std::vector<llvm::Constant*> types;
   for (const auto& name : compNames_) {
@@ -491,11 +497,17 @@ llvm::Function* Codegen::ensureExtern(const Decl& d) {
   std::string key = "extern_" + d.name;
   auto it = runtimeCache_.find(key);
   if (it != runtimeCache_.end()) return it->second;
+  auto existing = module_->getFunction(d.name);
+  if (existing) {
+    runtimeCache_[key] = existing;
+    return existing;
+  }
   std::vector<llvm::Type*> params;
   for (const auto& pt : d.paramTypes) params.push_back(llvmTypeFromName(pt));
   auto ft = llvm::FunctionType::get(llvmTypeFromName(d.retKind), params, false);
   auto fn = llvm::Function::Create(ft, llvm::GlobalValue::ExternalLinkage, d.name, *module_);
   runtimeCache_[key] = fn;
+  runtimeCache_[d.name] = fn;
   return fn;
 }
 
@@ -603,8 +615,13 @@ llvm::Type* Codegen::structType(const std::string& name) {
 }
 
 llvm::Function* Codegen::declareRuntime(const std::string& name, llvm::Type* ret,
-                                        std::vector<llvm::Type*> params) {
+                                         std::vector<llvm::Type*> params) {
   auto ft = llvm::FunctionType::get(ret, params, false);
+  auto existing = module_->getFunction(name);
+  if (existing) {
+    runtimeCache_[name] = existing;
+    return existing;
+  }
   auto fn = llvm::Function::Create(ft, llvm::GlobalValue::ExternalLinkage, name, *module_);
   runtimeCache_[name] = fn;
   return fn;
@@ -651,6 +668,18 @@ llvm::Value* Codegen::valToI64(llvm::Value* v) {
     return builder_.CreateBitCast(d, i64);
   }
   if (v->getType()->isPointerTy()) return builder_.CreatePtrToInt(v, i64);
+  if (v->getType()->isStructTy()) {
+    auto st = llvm::cast<llvm::StructType>(v->getType());
+    auto ptrTy = llvm::PointerType::get(st, 0);
+    auto dl = module_->getDataLayout();
+    auto sizeVal = llvm::ConstantInt::get(i64, dl.getTypeAllocSize(st));
+    auto i8p = llvm::PointerType::get(ctx_, 0);
+    auto mallocFn = runtimeFn("malloc", i8p, {i64});
+    auto ptr = builder_.CreateCall(mallocFn, {sizeVal});
+    auto typedPtr = builder_.CreateBitCast(ptr, ptrTy);
+    builder_.CreateStore(v, typedPtr);
+    return builder_.CreatePtrToInt(typedPtr, i64);
+  }
   return v;
 }
 
@@ -663,6 +692,12 @@ llvm::Value* Codegen::i64ToVal(llvm::Value* v, llvm::Type* ty) {
     return builder_.CreateFPTrunc(d, ty);
   }
   if (ty->isPointerTy()) return builder_.CreateIntToPtr(v, ty);
+  if (ty->isStructTy()) {
+    auto st = llvm::cast<llvm::StructType>(ty);
+    auto ptrTy = llvm::PointerType::get(st, 0);
+    auto ptr = builder_.CreateIntToPtr(v, ptrTy);
+    return builder_.CreateLoad(st, ptr);
+  }
   return v;
 }
 
@@ -764,6 +799,19 @@ void Codegen::storeTo(const Expr& lhs, llvm::Value* val) {
   }
 }
 
+// Helper: ensure two values have matching types for ICmp
+static llvm::Value* icmpMatch(llvm::IRBuilder<>& b, llvm::Value* lhs, llvm::Value* rhs) {
+  if (lhs->getType() == rhs->getType()) return nullptr;
+  // Both integers but different widths - extend the smaller
+  if (lhs->getType()->isIntegerTy() && rhs->getType()->isIntegerTy()) {
+    auto lw = lhs->getType()->getIntegerBitWidth();
+    auto rw = rhs->getType()->getIntegerBitWidth();
+    if (lw < rw) return b.CreateSExt(lhs, rhs->getType());
+    if (rw < lw) return b.CreateSExt(rhs, lhs->getType());
+  }
+  return nullptr;
+}
+
 llvm::Value* Codegen::genExpr(const Expr& e) {
   switch (e.kind) {
     case Expr::Kind::IntLit:
@@ -808,6 +856,7 @@ llvm::Value* Codegen::genExpr(const Expr& e) {
             return builder_.CreateGlobalStringPtr(cv.strVal);
         }
       }
+      error(e.loc, "undefined identifier '" + e.str + "'");
       return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
     }
     case Expr::Kind::MemberAccess: {
@@ -911,6 +960,7 @@ llvm::Value* Codegen::genExpr(const Expr& e) {
           }
         }
       }
+      error(e.loc, "cannot access member '" + e.member + "'");
       return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
     }
     case Expr::Kind::Call:
@@ -918,6 +968,10 @@ llvm::Value* Codegen::genExpr(const Expr& e) {
     case Expr::Kind::Binary: {
       if (e.binOp == BinaryOp::And || e.binOp == BinaryOp::Or) {
         auto lhs = genExpr(*e.lhs);
+        // Ensure lhs is i1 for CreateCondBr
+        if (lhs->getType() != llvm::Type::getInt1Ty(ctx_) && lhs->getType()->isIntegerTy()) {
+          lhs = builder_.CreateICmpNE(lhs, llvm::ConstantInt::get(lhs->getType(), 0));
+        }
         auto fn = curFn_;
         auto lhsBlock = builder_.GetInsertBlock();
         auto rhsBlock = llvm::BasicBlock::Create(ctx_, "logic.rhs", fn);
@@ -936,8 +990,24 @@ llvm::Value* Codegen::genExpr(const Expr& e) {
         auto shortVal = e.binOp == BinaryOp::And
                             ? llvm::ConstantInt::getFalse(ctx_)
                             : llvm::ConstantInt::getTrue(ctx_);
-        phi->addIncoming(shortVal, lhsBlock);
-        phi->addIncoming(rhs, rhsEnd);
+        // Ensure lhs is i1
+        llvm::Value* lhsVal = shortVal;
+        if (lhs->getType() != llvm::Type::getInt1Ty(ctx_)) {
+          if (lhs->getType()->isIntegerTy()) {
+            lhsVal = builder_.CreateICmpNE(lhs, llvm::ConstantInt::get(lhs->getType(), 0));
+          }
+        } else {
+          lhsVal = lhs;
+        }
+        // Ensure rhs is i1
+        llvm::Value* rhsVal = rhs;
+        if (rhs->getType() != llvm::Type::getInt1Ty(ctx_)) {
+          if (rhs->getType()->isIntegerTy()) {
+            rhsVal = builder_.CreateICmpNE(rhs, llvm::ConstantInt::get(rhs->getType(), 0));
+          }
+        }
+        phi->addIncoming(lhsVal, lhsBlock);
+        phi->addIncoming(rhsVal, rhsEnd);
         return phi;
       }
       auto ltRaw = genExpr(*e.lhs);
@@ -1002,24 +1072,59 @@ llvm::Value* Codegen::genExpr(const Expr& e) {
         case BinaryOp::Eq:
         case BinaryOp::Ne: {
           if (e.lhs->type && e.lhs->type->kind == TypeKind::String) {
-            auto f = runtimeFn("kx_str_eq", llvm::Type::getInt1Ty(ctx_),
+            auto f = runtimeFn("kx_str_eq", llvm::Type::getInt32Ty(ctx_),
                                {llvm::PointerType::get(ctx_, 0),
                                 llvm::PointerType::get(ctx_, 0)});
             auto eqv = builder_.CreateCall(f, {lt, rt});
-            if (e.binOp == BinaryOp::Ne) return builder_.CreateNot(eqv);
-            return eqv;
+            auto eqvI1 = builder_.CreateICmpNE(eqv, llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0));
+            if (e.binOp == BinaryOp::Ne) return builder_.CreateNot(eqvI1);
+            return eqvI1;
           }
           if (lt->getType()->isFloatingPointTy()) {
             auto p = e.binOp == BinaryOp::Eq ? llvm::CmpInst::FCMP_OEQ : llvm::CmpInst::FCMP_ONE;
             return builder_.CreateFCmp(p, lt, rt);
           }
           auto p = e.binOp == BinaryOp::Eq ? llvm::CmpInst::ICMP_EQ : llvm::CmpInst::ICMP_NE;
+          // Ensure both operands are the same type for ICmp
+          if (lt->getType() != rt->getType()) {
+            // Try to coerce to i64 if both are integers
+            if (lt->getType()->isIntegerTy() && rt->getType()->isIntegerTy()) {
+              auto maxBits = std::max(lt->getType()->getIntegerBitWidth(), rt->getType()->getIntegerBitWidth());
+              auto targetTy = llvm::Type::getIntNTy(ctx_, maxBits);
+              lt = builder_.CreateSExt(lt, targetTy);
+              rt = builder_.CreateSExt(rt, targetTy);
+            } else if (lt->getType()->isPointerTy() && rt->getType()->isIntegerTy()) {
+              rt = builder_.CreateIntToPtr(rt, lt->getType());
+            } else if (lt->getType()->isIntegerTy() && rt->getType()->isPointerTy()) {
+              lt = builder_.CreateIntToPtr(lt, rt->getType());
+            } else {
+              // Last resort: dump types and abort
+              std::string err = "ICmp type mismatch: lhs=";
+              llvm::raw_string_ostream os(err);
+              lt->getType()->print(os);
+              os << " rhs=";
+              rt->getType()->print(os);
+              errors_.push_back(err);
+              return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
+            }
+          }
           return builder_.CreateICmp(p, lt, rt);
         }
         case BinaryOp::Lt:
         case BinaryOp::Gt:
         case BinaryOp::Le:
         case BinaryOp::Ge: {
+          if (e.lhs->type && e.lhs->type->kind == TypeKind::String) {
+            std::string fnName = "kx_str_lt";
+            if (e.binOp == BinaryOp::Gt) fnName = "kx_str_gt";
+            if (e.binOp == BinaryOp::Le) fnName = "kx_str_le";
+            if (e.binOp == BinaryOp::Ge) fnName = "kx_str_ge";
+            auto f = runtimeFn(fnName, llvm::Type::getInt32Ty(ctx_),
+                               {llvm::PointerType::get(ctx_, 0),
+                                llvm::PointerType::get(ctx_, 0)});
+            auto eqv = builder_.CreateCall(f, {lt, rt});
+            return builder_.CreateICmpNE(eqv, llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0));
+          }
           if (lt->getType()->isFloatingPointTy()) {
             llvm::CmpInst::Predicate p = llvm::CmpInst::FCMP_OLT;
             if (e.binOp == BinaryOp::Gt) p = llvm::CmpInst::FCMP_OGT;
@@ -1031,6 +1136,19 @@ llvm::Value* Codegen::genExpr(const Expr& e) {
           if (e.binOp == BinaryOp::Gt) p = llvm::CmpInst::ICMP_SGT;
           if (e.binOp == BinaryOp::Le) p = llvm::CmpInst::ICMP_SLE;
           if (e.binOp == BinaryOp::Ge) p = llvm::CmpInst::ICMP_SGE;
+          // Ensure both operands are the same type
+          if (lt->getType() != rt->getType()) {
+            if (lt->getType()->isIntegerTy() && rt->getType()->isIntegerTy()) {
+              auto maxBits = std::max(lt->getType()->getIntegerBitWidth(), rt->getType()->getIntegerBitWidth());
+              auto targetTy = llvm::Type::getIntNTy(ctx_, maxBits);
+              lt = builder_.CreateSExt(lt, targetTy);
+              rt = builder_.CreateSExt(rt, targetTy);
+            } else if (lt->getType()->isPointerTy() && rt->getType()->isIntegerTy()) {
+              rt = builder_.CreateIntToPtr(rt, lt->getType());
+            } else if (lt->getType()->isIntegerTy() && rt->getType()->isPointerTy()) {
+              lt = builder_.CreateIntToPtr(lt, rt->getType());
+            }
+          }
           return builder_.CreateICmp(p, lt, rt);
         }
         default:
@@ -1060,6 +1178,10 @@ llvm::Value* Codegen::genExpr(const Expr& e) {
     }
     case Expr::Kind::Ternary: {
       auto cond = genExpr(*e.lhs);
+      // Ensure cond is i1
+      if (cond->getType() != llvm::Type::getInt1Ty(ctx_) && cond->getType()->isIntegerTy()) {
+        cond = builder_.CreateICmpNE(cond, llvm::ConstantInt::get(cond->getType(), 0));
+      }
       auto fn = curFn_;
       auto thenBlock = llvm::BasicBlock::Create(ctx_, "tern.then", fn);
       auto elseBlock = llvm::BasicBlock::Create(ctx_, "tern.else", fn);
@@ -1074,14 +1196,33 @@ llvm::Value* Codegen::genExpr(const Expr& e) {
       maybeBr(builder_, mergeBlock);
       auto elseEnd = builder_.GetInsertBlock();
       builder_.SetInsertPoint(mergeBlock);
-      auto phi = builder_.CreatePHI(llvmType(e.type), 0);
+      auto phiTy = llvmType(e.type);
+      auto phi = builder_.CreatePHI(phiTy, 0);
+      // Ensure tv and fv match phi type
+      if (tv->getType() != phiTy) {
+        if (tv->getType()->isIntegerTy() && phiTy->isIntegerTy()) {
+          tv = builder_.CreateSExt(tv, phiTy);
+        } else if (tv->getType()->isPointerTy() && phiTy->isPointerTy()) {
+          tv = builder_.CreateBitCast(tv, phiTy);
+        }
+      }
+      if (fv->getType() != phiTy) {
+        if (fv->getType()->isIntegerTy() && phiTy->isIntegerTy()) {
+          fv = builder_.CreateSExt(fv, phiTy);
+        } else if (fv->getType()->isPointerTy() && phiTy->isPointerTy()) {
+          fv = builder_.CreateBitCast(fv, phiTy);
+        }
+      }
       phi->addIncoming(tv, thenEnd);
       phi->addIncoming(fv, elseEnd);
       return phi;
     }
     case Expr::Kind::Assign: {
       llvm::Value* val = genExpr(*e.rhs);
-      if (e.asOp != AssignOp::Assign) {
+      bool strConcat = e.asOp == AssignOp::Add && e.lhs->type &&
+                       (e.lhs->type->kind == TypeKind::String ||
+                        (e.rhs->type && e.rhs->type->kind == TypeKind::String));
+      if (e.asOp != AssignOp::Assign && !strConcat) {
         auto resTy = llvmType(e.type);
         auto l = coerce(genExpr(*e.lhs), resTy);
         auto r = coerce(val, resTy);
@@ -1105,6 +1246,14 @@ llvm::Value* Codegen::genExpr(const Expr& e) {
           default:
             break;
         }
+      }
+      if (strConcat) {
+        auto cat = getRuntime("kx_str_cat");
+        if (!cat) cat = declareRuntime("kx_str_cat", llvm::PointerType::get(ctx_, 0),
+                                       {llvm::PointerType::get(ctx_, 0), llvm::PointerType::get(ctx_, 0)});
+        auto l = toStr(genExpr(*e.lhs), e.lhs->type);
+        auto r = toStr(val, e.rhs->type);
+        val = builder_.CreateCall(cat, {l, r});
       }
       auto promoted = coerce(val, llvmType(e.lhs->type));
       storeTo(*e.lhs, promoted);
@@ -1338,6 +1487,34 @@ llvm::Value* Codegen::genCall(const Expr& call) {
         opt = builder_.CreateInsertValue(opt, val, 1);
         return opt;
       }
+      if (member == "args") {
+        auto newFn = runtimeFn("kx_list_new", llvm::Type::getInt64Ty(ctx_),
+                               {llvm::Type::getInt32Ty(ctx_)});
+        auto argsFn = runtimeFn("kx_args", llvm::Type::getInt64Ty(ctx_),
+                                {llvm::Type::getInt64Ty(ctx_)});
+        auto list = builder_.CreateCall(newFn,
+                                        {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 2)});
+        return builder_.CreateCall(argsFn, {list});
+      }
+      if (member == "readFile") {
+        auto arg = call.args.empty()
+                       ? builder_.CreateGlobalStringPtr("")
+                       : toStr(genExpr(*call.args[0].value), call.args[0].value->type);
+        auto f = runtimeFn("kx_read_file", llvm::PointerType::get(ctx_, 0),
+                           {llvm::PointerType::get(ctx_, 0)});
+        return builder_.CreateCall(f, {arg});
+      }
+      if (member == "writeFile") {
+        auto path = call.args.empty()
+                        ? builder_.CreateGlobalStringPtr("")
+                        : toStr(genExpr(*call.args[0].value), call.args[0].value->type);
+        auto data = call.args.size() < 2
+                        ? builder_.CreateGlobalStringPtr("")
+                        : toStr(genExpr(*call.args[1].value), call.args[1].value->type);
+        auto f = runtimeFn("kx_write_file", llvm::Type::getInt32Ty(ctx_),
+                           {llvm::PointerType::get(ctx_, 0), llvm::PointerType::get(ctx_, 0)});
+        return builder_.CreateCall(f, {path, data});
+      }
       if (member == "rng") {
         llvm::Value* arg = call.args.empty()
                                ? llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0))
@@ -1458,6 +1635,14 @@ llvm::Value* Codegen::genCall(const Expr& call) {
       if (m == "Lower") {
         auto f = runtimeFn("kx_str_lower", ptr, {ptr});
         return builder_.CreateCall(f, {obj});
+      }
+      if (m == "Trim") {
+        auto f = runtimeFn("kx_str_trim", ptr, {ptr});
+        return builder_.CreateCall(f, {obj});
+      }
+      if (m == "IndexOf") {
+        auto f = runtimeFn("kx_str_index_of", llvm::Type::getInt64Ty(ctx_), {ptr, ptr});
+        return builder_.CreateCall(f, {obj, genExpr(*call.args[0].value)});
       }
       return llvm::ConstantInt::get(ctx_, llvm::APInt(64, 0));
     }
@@ -1588,6 +1773,10 @@ void Codegen::genStmt(const Stmt& s) {
       return;
     case Stmt::Kind::If: {
       auto cond = genExpr(*s.cond);
+      // Ensure cond is i1
+      if (cond->getType() != llvm::Type::getInt1Ty(ctx_) && cond->getType()->isIntegerTy()) {
+        cond = builder_.CreateICmpNE(cond, llvm::ConstantInt::get(cond->getType(), 0));
+      }
       auto fn = curFn_;
       auto thenBlock = llvm::BasicBlock::Create(ctx_, "if.then", fn);
       auto mergeBlock = llvm::BasicBlock::Create(ctx_, "if.merge", fn);
@@ -1617,6 +1806,10 @@ void Codegen::genStmt(const Stmt& s) {
       maybeBr(builder_, condBlock);
       builder_.SetInsertPoint(condBlock);
       auto cond = genExpr(*s.cond);
+      // Ensure cond is i1
+      if (cond->getType() != llvm::Type::getInt1Ty(ctx_) && cond->getType()->isIntegerTy()) {
+        cond = builder_.CreateICmpNE(cond, llvm::ConstantInt::get(cond->getType(), 0));
+      }
       builder_.CreateCondBr(cond, bodyBlock, exitBlock);
       builder_.SetInsertPoint(bodyBlock);
       loops_.push_back({condBlock, exitBlock});
@@ -1879,16 +2072,26 @@ void Codegen::genStmt(const Stmt& s) {
         llvm::Value* matched = nullptr;
         for (auto& v : sc.values) {
           auto vv = genExpr(*v);
-          auto cc = builder_.CreateLoad(condAlloca->getAllocatedType(), condAlloca);
+          llvm::Value* cc = builder_.CreateLoad(condAlloca->getAllocatedType(), condAlloca);
           llvm::Value* eq;
           if (cc->getType()->isFloatingPointTy()) {
             eq = builder_.CreateFCmp(llvm::CmpInst::FCMP_OEQ, cc, vv);
           } else if (cc->getType()->isPointerTy()) {
-            auto f = runtimeFn("kx_str_eq", llvm::Type::getInt1Ty(ctx_),
+            auto f = runtimeFn("kx_str_eq", llvm::Type::getInt32Ty(ctx_),
                                {llvm::PointerType::get(ctx_, 0),
                                 llvm::PointerType::get(ctx_, 0)});
-            eq = builder_.CreateCall(f, {cc, vv});
+            auto eqv = builder_.CreateCall(f, {cc, vv});
+            eq = builder_.CreateICmpNE(eqv, llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0));
           } else {
+            // Ensure both operands are the same type for ICmp
+            if (cc->getType() != vv->getType()) {
+              if (cc->getType()->isIntegerTy() && vv->getType()->isIntegerTy()) {
+                auto maxBits = std::max(cc->getType()->getIntegerBitWidth(), vv->getType()->getIntegerBitWidth());
+                auto targetTy = llvm::Type::getIntNTy(ctx_, maxBits);
+                cc = builder_.CreateSExt(cc, targetTy);
+                vv = builder_.CreateSExt(vv, targetTy);
+              }
+            }
             eq = builder_.CreateICmp(llvm::CmpInst::ICMP_EQ, cc, vv);
           }
           matched = matched ? builder_.CreateOr(matched, eq) : eq;
@@ -2004,6 +2207,11 @@ void Codegen::emitFunction(const Decl& d, const std::vector<std::shared_ptr<Type
 
   std::vector<llvm::Type*> lparams;
   for (const auto& p : paramTypes) lparams.push_back(llvmType(p));
+  if (d.name == "main") {
+    lparams.clear();
+    lparams.push_back(llvm::Type::getInt32Ty(ctx_));
+    lparams.push_back(llvm::PointerType::get(ctx_, 0));
+  }
   auto ft = llvm::FunctionType::get(llvmType(retType), lparams, false);
   auto fn = llvm::Function::Create(ft, llvm::GlobalValue::ExternalLinkage,
                                    mangle(d.name, paramTypes), *module_);

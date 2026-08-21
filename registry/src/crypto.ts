@@ -10,8 +10,33 @@ export function generateSalt(): string {
   return arrayBufferToHex(bytes.buffer);
 }
 
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  }
+  return bytes;
+}
+
 export async function hashPassword(password: string, salt: string): Promise<string> {
-  return sha256(salt + password);
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(password),
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      salt: hexToBytes(salt),
+      iterations: 100000,
+      hash: 'SHA-256',
+    },
+    keyMaterial,
+    256
+  );
+  return arrayBufferToHex(bits);
 }
 
 export async function verifyPassword(

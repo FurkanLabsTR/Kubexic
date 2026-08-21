@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(bash build.sh 2 >& 1)",
+      "Shell(cmake:*)",
+      "Shell(make:*)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

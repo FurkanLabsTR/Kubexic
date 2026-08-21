@@ -1,0 +1,13 @@
+# Taste
+- Prefers dogfooding: project tooling (e.g., compiler, package manager) should be written in the project's own language (Kubexic) rather than C++/other languages. Confidence: 0.9
+- Values security as a first-class concern in infrastructure (cloud-based package hosting, signing, supply chain) — not an afterthought. Confidence: 0.8
+- Values honest, differentiated status reporting — wants to distinguish real/production-ready implementations from scaffolding or placeholders rather than receiving inflated "all done" summaries. Confidence: 0.75
+- Prefers unified single-binary tooling: compiler and package manager should live in one program (like Rust's rustc/cargo model) rather than separate executables. Confidence: 0.85
+- Before acting on a request, wants the assistant to explain everything it found and audit the codebase for problems first (survey for bugs/TODOs/gaps before planning or implementing). Confidence: 0.9
+- Prefers uninterrupted, full-plan implementation — explicitly asks the assistant to "implement all of it without stopping" rather than pausing between phases, and calls out when the assistant stops prematurely (repeatedly frustrated by assistant pausing to summarize). Confidence: 0.99
+- Wants persistent, never-give-up execution — repeatedly tells the assistant "dont stop" and "continue working" when it pauses, and becomes frustrated when the assistant repeats the same summary instead of advancing. Confidence: 0.95
+- Wants pragmatic incremental progress over perfect solutions — accepts "compiles and works end-to-end" even if not every language feature is fully implemented, and wants the assistant to move forward rather than spiral on edge cases. Confidence: 0.85
+- Prefers action over investigation when the problem space is understood — after the assistant identifies a bug, wants immediate fixing rather than further analysis cycles. Confidence: 0.8
+- Wants status checks to be quick and factual, not lengthy summaries — asks "status of the plan?" or "how much did you complete?" expecting a concise percentage/checklist, not a wall of text. Confidence: 0.75
+- Values bootstrapping correctness: when deprecating the C++ compiler, wants it moved to a separate GitHub repository for archival rather than deleted, and wants the transition plan to be solid before acting. Confidence: 0.8
+- When deprecating code, prefers moving it to a separate GitHub repository for archival rather than deleting it from the main repo. Confidence: 0.7

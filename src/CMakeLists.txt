@@ -1,6 +1,8 @@
 add_library(kubexic_core STATIC
   lexer/lexer.cpp
   parser/parser.cpp
+  ast/clone.cpp
+  ast/pretty.cpp
   sema/types.cpp
   sema/checker.cpp
   mir/mir.cpp

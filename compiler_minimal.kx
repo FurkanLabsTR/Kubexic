@@ -1,0 +1,129 @@
+// compiler_minimal.kx -- Minimal Kubexic compiler
+// Compiles simple .kx programs to LLVM IR
+
+extern int kx_argc();
+extern string kx_argv(int i);
+extern string kx_read_file(string path);
+extern int kx_write_file(string path, string data);
+extern int kx_println(string s);
+
+var IntStr(v) {
+    if (v == 0) return "0";
+    var s = "";
+    var n = v;
+    if (n < 0) { s = "-"; n = 0 - n; }
+    var digits = "";
+    while (n > 0) {
+        var d = n % 10;
+        digits = ("" + ($"{d}")) + digits;
+        n = n / 10;
+    }
+    return s + digits;
+}
+
+var IsDigit(c) {
+    return c >= "0" && c <= "9";
+}
+
+var IsLetter(c) {
+    return (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
+}
+
+var IsIdentPart(c) {
+    return IsLetter(c) || IsDigit(c) || c == "_";
+}
+
+var IsSpace(c) {
+    return c == " " || c == "\t" || c == "\n" || c == "\r";
+}
+
+var CharAt(s, i) {
+    if (i < 0 || i >= s.Length) {
+        return "";
+    }
+    return s.Substring(i, 1);
+}
+
+var LexAll(src) {
+    var tokens = List<int>();
+    var pos = 0;
+    var line = 1;
+    var col = 1;
+    var n = src.Length;
+    while (pos < n) {
+        var c = CharAt(src, pos);
+        if (IsSpace(c)) {
+            pos = pos + 1;
+            col = col + 1;
+            if (c == "\n") {
+                line = line + 1;
+                col = 1;
+            }
+            continue;
+        }
+        if (c == "/" && CharAt(src, pos + 1) == "/") {
+            while (pos < n && CharAt(src, pos) != "\n") {
+                pos = pos + 1;
+                col = col + 1;
+            }
+            continue;
+        }
+        if (IsLetter(c) || c == "_") {
+            var start = pos;
+            var startCol = col;
+            var startLine = line;
+            while (pos < n && IsIdentPart(CharAt(src, pos))) {
+                pos = pos + 1;
+                col = col + 1;
+            }
+            var text = src.Substring(start, pos - start);
+            var kind = "id";
+            if (text == "var" || text == "int" || text == "void" ||
+                text == "return" || text == "if" || text == "else" ||
+                text == "while" || text == "for" || text == "extern") {
+                kind = "kw";
+            }
+            tokens.Add(0);
+            continue;
+        }
+        if (IsDigit(c)) {
+            var start = pos;
+            var startCol = col;
+            var startLine = line;
+            while (pos < n && IsDigit(CharAt(src, pos))) {
+                pos = pos + 1;
+                col = col + 1;
+            }
+            var text = src.Substring(start, pos - start);
+            tokens.Add(0);
+            continue;
+        }
+        if (c == "\"") {
+            var startCol = col;
+            var startLine = line;
+            pos = pos + 1;
+            col = col + 1;
+            var text = "";
+            while (pos < n && CharAt(src, pos) != "\"") {
+                text = text + CharAt(src, pos);
+                pos = pos + 1;
+                col = col + 1;
+            }
+            pos = pos + 1;
+            col = col + 1;
+            tokens.Add(0);
+            continue;
+        }
+        tokens.Add(0);
+        pos = pos + 1;
+        col = col + 1;
+    }
+    tokens.Add(0);
+    return tokens;
+}
+
+int main() {
+    std.println("Kubexic minimal compiler v0.1");
+    std.println("Compiles simple .kx to LLVM IR");
+    return 0;
+}

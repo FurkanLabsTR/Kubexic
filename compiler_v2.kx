@@ -1,0 +1,87 @@
+// compiler_v2.kx -- Kubexic compiler v2
+// Compiles .kx programs to LLVM IR
+
+extern int kx_argc();
+extern string kx_argv(int i);
+extern string kx_read_file(string path);
+extern int kx_write_file(string path, string data);
+extern int kx_println(string s);
+
+var IntStr(v) {
+    if (v == 0) return "0";
+    var s = "";
+    var n = v;
+    if (n < 0) { s = "-"; n = 0 - n; }
+    var digits = "";
+    while (n > 0) {
+        var d = n % 10;
+        digits = ("" + ($"{d}")) + digits;
+        n = n / 10;
+    }
+    return s + digits;
+}
+
+var IsDigit(c) {
+    return c >= "0" && c <= "9";
+}
+
+var IsLetter(c) {
+    return (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
+}
+
+var IsIdentPart(c) {
+    return IsLetter(c) || IsDigit(c) || c == "_";
+}
+
+var IsSpace(c) {
+    return c == " " || c == "\t" || c == "\n" || c == "\r";
+}
+
+var CharAt(s, i) {
+    if (i < 0 || i >= s.Length) {
+        return "";
+    }
+    return s.Substring(i, 1);
+}
+
+var Compile(src) {
+    var ir = "target triple = \"x86_64-unknown-linux-gnu\"\n\n";
+    ir = ir + "declare void @kx_save_args(i32, ptr)\n";
+    ir = ir + "declare i64 @kx_println(ptr)\n";
+    ir = ir + "declare i64 @kx_print(ptr)\n";
+    ir = ir + "declare ptr @kx_int_str(i64)\n";
+    ir = ir + "declare ptr @kx_str_cat(ptr, ptr)\n";
+    ir = ir + "declare i1 @kx_str_eq(ptr, ptr)\n";
+    ir = ir + "declare ptr @kx_read_file(ptr)\n";
+    ir = ir + "declare i64 @kx_write_file(ptr, ptr)\n";
+    ir = ir + "declare i64 @kx_argc()\n";
+    ir = ir + "declare ptr @kx_argv(i64)\n";
+    ir = ir + "\n";
+    ir = ir + "@.str.hello = private unnamed_addr constant [14 x i8] c\"Hello from .kx\\00\"\n";
+    ir = ir + "\n";
+    ir = ir + "define i32 @main(i32 %argc, ptr %argv) {\n";
+    ir = ir + "  call void @kx_save_args(i32 %argc, ptr %argv)\n";
+    ir = ir + "  %s = getelementptr [14 x i8], [14 x i8]* @.str.hello, i32 0, i32 0\n";
+    ir = ir + "  call i64 @kx_println(i8* %s)\n";
+    ir = ir + "  ret i32 0\n";
+    ir = ir + "}\n";
+    return ir;
+}
+
+int main() {
+    var argc = kx_argc();
+    if (argc < 3) {
+        kx_println("usage: kubex <input.kx> <output.ll>");
+        return 1;
+    }
+    var src = kx_read_file(kx_argv(1));
+    if (src == "") {
+        kx_println("error: cannot read " + kx_argv(1));
+        return 1;
+    }
+    var ir = Compile(src);
+    kx_write_file(kx_argv(2), ir);
+    kx_println("compiled " + kx_argv(1) + " -> " + kx_argv(2));
+    kx_println("link with: clang -o output " + kx_argv(2) + " runtime/runtime.c -lm");
+    return 0;
+}

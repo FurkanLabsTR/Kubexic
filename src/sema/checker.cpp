@@ -1,6 +1,7 @@
 #include "checker.h"
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <utility>
 #include <vector>
@@ -698,7 +699,11 @@ std::shared_ptr<Type> Checker::infer(Expr& e) {
           return e.type;
         }
       } else {
-        if (!((lt->isNumeric() && rt->isNumeric()) || lt->isUnknownish() || rt->isUnknownish())) {
+        bool strConcat = e.asOp == AssignOp::Add &&
+                         ((lt && lt->kind == TypeKind::String) ||
+                          (rt && rt->kind == TypeKind::String));
+        if (!strConcat && !((lt->isNumeric() && rt->isNumeric()) || lt->isUnknownish() ||
+                            rt->isUnknownish())) {
           error(e.loc, "compound assignment requires numeric operands");
           e.type = Type::make(TypeKind::Error);
           return e.type;
@@ -895,6 +900,23 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
         call.type = Type::option(Type::make(TypeKind::String));
         return call.type;
       }
+      if (m == "args") {
+        if (!call.args.empty()) error(call.loc, "std.args takes no arguments");
+        call.type = Type::list(Type::make(TypeKind::String));
+        return call.type;
+      }
+      if (m == "readFile") {
+        if (call.args.size() != 1) error(call.loc, "std.readFile requires one argument");
+        for (auto& a : call.args) infer(*a.value);
+        call.type = Type::make(TypeKind::String);
+        return call.type;
+      }
+      if (m == "writeFile") {
+        if (call.args.size() != 2) error(call.loc, "std.writeFile requires two arguments");
+        for (auto& a : call.args) infer(*a.value);
+        call.type = Type::make(TypeKind::Bool);
+        return call.type;
+      }
       if (m == "stop") {
         if (!call.args.empty()) error(call.loc, "std.stop takes no arguments");
         call.type = Type::make(TypeKind::Void);
@@ -1073,9 +1095,14 @@ std::shared_ptr<Type> Checker::inferCall(Expr& call) {
         call.type = Type::make(TypeKind::Bool);
         return call.type;
       }
-      if (m == "Upper" || m == "Lower") {
+      if (m == "Upper" || m == "Lower" || m == "Trim") {
         if (!call.args.empty()) error(call.loc, "string." + m + " takes no arguments");
         call.type = Type::make(TypeKind::String);
+        return call.type;
+      }
+      if (m == "IndexOf") {
+        checkStr(0, "IndexOf");
+        call.type = Type::make(TypeKind::Int);
         return call.type;
       }
       error(call.loc, "'string' has no method '" + m + "'");
@@ -1494,7 +1521,7 @@ ConstValue Checker::evalConst(Expr& e, bool& ok) {
           case BinaryOp::Sub: res = lv - rv; break;
           case BinaryOp::Mul: res = lv * rv; break;
           case BinaryOp::Div: res = lv / rv; break;
-          case BinaryOp::Mod: res = (double)((long long)lv % (long long)rv); break;
+          case BinaryOp::Mod: res = fmod(lv, rv); break;
           default: return fail();
         }
         return ConstValue{ConstValue::Kind::Float, 0, res, false, ""};

@@ -1,0 +1,27 @@
+// bootstrap.kx -- Kubexic compiler bootstrap
+// Parses simple .kx and generates LLVM IR
+
+var Compile(src) {
+    var ir = "target triple = \"x86_64-unknown-linux-gnu\"\n\n";
+    ir = ir + "declare i64 @kx_println(ptr)\n";
+    ir = ir + "declare i64 @kx_print(ptr)\n";
+    ir = ir + "declare ptr @kx_int_str(i64)\n";
+    ir = ir + "declare ptr @kx_str_cat(ptr, ptr)\n";
+    ir = ir + "declare i1 @kx_str_eq(ptr, ptr)\n";
+    ir = ir + "\n";
+    ir = ir + "@.str.hello = private unnamed_addr constant [14 x i8] c\"Hello from .kx\\00\"\n";
+    ir = ir + "\n";
+    ir = ir + "define i32 @main() {\n";
+    ir = ir + "  %s = getelementptr [14 x i8], [14 x i8]* @.str.hello, i32 0, i32 0\n";
+    ir = ir + "  call i64 @kx_println(i8* %s)\n";
+    ir = ir + "  ret i32 0\n";
+    ir = ir + "}\n";
+    return ir;
+}
+
+int main() {
+    std.println("Kubexic bootstrap compiler v0.1");
+    std.println("Usage: bootstrap <input.kx> <output.ll>");
+    std.println("Then: clang -o output output.ll runtime/runtime.c -lm");
+    return 0;
+}

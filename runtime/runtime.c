@@ -4,6 +4,8 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <execinfo.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -26,6 +28,7 @@ char* kx_dup(const char* s);
 
 #define KX_COLLECTION_LIST 1
 #define KX_COLLECTION_MAP 2
+#define KX_MAP_EMPTY ((long long)0xFFFFFFFFFFFFFFFF)
 #define KX_KIND_I64 0
 #define KX_KIND_F64 1
 #define KX_KIND_STR 2
@@ -79,7 +82,15 @@ void kx_list_add(long long h, long long val) {
 
 long long kx_list_get(long long h, long long i) {
   kx_vec* v = vecOf(h);
-  if (!v || i < 0 || i >= v->size) kx_panic("List.Get: index out of range");
+  if (!v || i < 0 || i >= v->size) {
+    fprintf(stderr, "FATAL: List.Get index=%lld size=%d vec=%p elemKind=%d\n", i, v ? v->size : -1, (void*)v, v ? v->elemKind : -1);
+    void* bt[20];
+    int nframes = backtrace(bt, 20);
+    char** symbols = backtrace_symbols(bt, nframes);
+    for (int fi = 0; fi < nframes && fi < 15; fi++) fprintf(stderr, "  #%d %s\n", fi, symbols[fi]);
+    free(symbols);
+    kx_panic("List.Get: index out of range");
+  }
   return v->data[i];
 }
 
@@ -156,12 +167,13 @@ static int keyEq(const kx_map* m, long long a, long long b) {
 
 static void mapGrow(kx_map* m) {
   long long newCap = m->cap ? m->cap * 2 : 8;
-  long long* newKeys = (long long*)calloc(newCap, 8);
+  long long* newKeys = (long long*)malloc(newCap * 8);
   long long* newVals = (long long*)calloc(newCap, 8);
+  for (long long i = 0; i < newCap; i++) newKeys[i] = KX_MAP_EMPTY;
   for (long long i = 0; i < m->cap; i++) {
-    if (m->keys[i] == 0) continue;
+    if (m->keys[i] == KX_MAP_EMPTY) continue;
     long long j = hashKey(m, m->keys[i]) & (newCap - 1);
-    while (newKeys[j] != 0) j = (j + 1) & (newCap - 1);
+    while (newKeys[j] != KX_MAP_EMPTY) j = (j + 1) & (newCap - 1);
     newKeys[j] = m->keys[i];
     newVals[j] = m->vals[i];
   }
@@ -176,8 +188,9 @@ long long kx_map_new(int keyKind, int valKind) {
   kx_map* m = (kx_map*)calloc(1, sizeof(kx_map));
   m->kind = KX_COLLECTION_MAP;
   m->cap = 8;
-  m->keys = (long long*)calloc(m->cap, 8);
+  m->keys = (long long*)malloc(m->cap * 8);
   m->vals = (long long*)calloc(m->cap, 8);
+  for (long long i = 0; i < m->cap; i++) m->keys[i] = KX_MAP_EMPTY;
   m->keyKind = keyKind;
   m->valKind = valKind;
   return (long long)(uintptr_t)m;
@@ -190,8 +203,8 @@ void kx_map_set(long long h, long long key, long long val) {
   if (m->valKind == KX_KIND_STR) val = (long long)(uintptr_t)kx_dup((char*)(uintptr_t)val);
   if ((m->size + 1) * 10 >= m->cap * 7) mapGrow(m);
   long long i = hashKey(m, key) & (m->cap - 1);
-  while (m->keys[i] != 0 && !keyEq(m, m->keys[i], key)) i = (i + 1) & (m->cap - 1);
-  if (m->keys[i] == 0) {
+  while (m->keys[i] != KX_MAP_EMPTY && !keyEq(m, m->keys[i], key)) i = (i + 1) & (m->cap - 1);
+  if (m->keys[i] == KX_MAP_EMPTY) {
     m->keys[i] = key;
     m->size++;
   } else {
@@ -205,7 +218,7 @@ long long kx_map_get(long long h, long long key) {
   kx_map* m = mapOf(h);
   if (!m) kx_panic("Map.Get: null map");
   long long i = hashKey(m, key) & (m->cap - 1);
-  while (m->keys[i] != 0) {
+  while (m->keys[i] != KX_MAP_EMPTY) {
     if (keyEq(m, m->keys[i], key)) return m->vals[i];
     i = (i + 1) & (m->cap - 1);
   }
@@ -217,7 +230,7 @@ int kx_map_has(long long h, long long key) {
   kx_map* m = mapOf(h);
   if (!m) return 0;
   long long i = hashKey(m, key) & (m->cap - 1);
-  while (m->keys[i] != 0) {
+  while (m->keys[i] != KX_MAP_EMPTY) {
     if (keyEq(m, m->keys[i], key)) return 1;
     i = (i + 1) & (m->cap - 1);
   }
@@ -228,9 +241,9 @@ void kx_map_remove(long long h, long long key) {
   kx_map* m = mapOf(h);
   if (!m) return;
   long long i = hashKey(m, key) & (m->cap - 1);
-  while (m->keys[i] != 0) {
+  while (m->keys[i] != KX_MAP_EMPTY) {
     if (keyEq(m, m->keys[i], key)) {
-      m->keys[i] = 0;
+      m->keys[i] = KX_MAP_EMPTY;
       m->vals[i] = 0;
       m->size--;
       return;
@@ -242,7 +255,7 @@ void kx_map_remove(long long h, long long key) {
 void kx_map_clear(long long h) {
   kx_map* m = mapOf(h);
   if (!m) return;
-  memset(m->keys, 0, m->cap * 8);
+  for (long long i = 0; i < m->cap; i++) m->keys[i] = KX_MAP_EMPTY;
   memset(m->vals, 0, m->cap * 8);
   m->size = 0;
 }
@@ -280,7 +293,7 @@ static long long copyHandle(long long h, int kind) {
     kx_map* m = (kx_map*)h;
     long long nh = kx_map_new(m->keyKind, m->valKind);
     for (long long i = 0; i < m->cap; i++) {
-      if (m->keys[i] == 0) continue;
+      if (m->keys[i] == KX_MAP_EMPTY) continue;
       long long k = m->keyKind == KX_KIND_COLL ? copyHandle(m->keys[i], 3) : m->keys[i];
       long long vv = m->valKind == KX_KIND_COLL ? copyHandle(m->vals[i], 3) : m->vals[i];
       kx_map_set(nh, k, vv);
@@ -304,7 +317,7 @@ static void freeHandle(long long h) {
   } else if (c->kind == KX_COLLECTION_MAP) {
     kx_map* m = (kx_map*)h;
     for (long long i = 0; i < m->cap; i++) {
-      if (m->keys[i] == 0) continue;
+      if (m->keys[i] == KX_MAP_EMPTY) continue;
       if (m->keyKind == KX_KIND_COLL) freeHandle(m->keys[i]);
       else if (m->keyKind == KX_KIND_STR) free((void*)(uintptr_t)m->keys[i]);
       if (m->valKind == KX_KIND_COLL) freeHandle(m->vals[i]);
@@ -552,7 +565,7 @@ static kx_box* resolveBox(kx_entity e) {
 
 static void growArr(void** arr, size_t elemSize, int oldCap, int newCap) {
   void* fresh = realloc(*arr, elemSize * newCap);
-  if (!fresh) return;
+  if (!fresh) kx_panic("out of memory");
   memset((char*)fresh + elemSize * oldCap, 0, elemSize * (newCap - oldCap));
   *arr = fresh;
 }
@@ -590,9 +603,8 @@ static void createBoxes(int count) {
           free(g_boxes[i].fzFields[c * KX_MAX_FIELDS + f]);
         }
       }
-      for (int s = 0; s < count; s++) {
+      for (int s = 0; s < g_boxCount; s++) {
         free(g_boxes[i].queues[s]);
-        free(g_boxes[i].qSize);
       }
       free(g_boxes[i].queues);
       free(g_boxes[i].qSize);
@@ -1657,7 +1669,17 @@ void kx_run(int tps, long long maxTicks, double cores) {
 char* kx_dup(const char* s) {
   size_t n = strlen(s);
   char* p = (char*)malloc(n + 1);
-  if (p) memcpy(p, s, n + 1);
+  if (!p) kx_panic("out of memory");
+  memcpy(p, s, n + 1);
+  return p;
+}
+
+char* kx_dup_n(const char* s, int len) {
+  if (!s || len <= 0) { char* p = (char*)malloc(1); p[0] = '\0'; return p; }
+  char* p = (char*)malloc((size_t)len + 1);
+  if (!p) kx_panic("out of memory");
+  memcpy(p, s, (size_t)len);
+  p[len] = '\0';
   return p;
 }
 
@@ -1709,9 +1731,24 @@ char* kx_str_substr(const char* s, long long start, long long len) {
   return p;
 }
 
+char* kx_str_trim(const char* s) {
+  if (!s) return kx_dup("");
+  const char* start = s;
+  while (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r') start++;
+  const char* end = s + strlen(s);
+  while (end > start && (*(end-1) == ' ' || *(end-1) == '\t' || *(end-1) == '\n' || *(end-1) == '\r')) end--;
+  return kx_dup_n(start, (int)(end - start));
+}
+
 int kx_str_contains(const char* a, const char* b) {
   if (!a || !b) return 0;
   return strstr(a, b) != NULL;
+}
+
+long long kx_str_index_of(const char* s, const char* sub) {
+  if (!s || !sub) return -1;
+  const char* p = strstr(s, sub);
+  return p ? (long long)(p - s) : -1;
 }
 
 int kx_str_starts_with(const char* a, const char* b) {
@@ -1786,6 +1823,11 @@ void kx_exit(int code) {
   bufFlush(g_currentBuffer >= 0 ? g_currentBuffer : g_boxCount);
   fflush(stdout);
   exit(code);
+}
+
+int kx_system(const char* cmd) {
+  if (!cmd) return -1;
+  return system(cmd);
 }
 
 void kx_panic(const char* msg) {
@@ -1879,6 +1921,7 @@ char* kx_int_str(long long v) {
 
 long long kx_struct_new(int fieldCount) {
   long long h = (long long)(uintptr_t)malloc((size_t)fieldCount * sizeof(long long));
+  if (!h) kx_panic("out of memory");
   memset((void*)h, 0, (size_t)fieldCount * sizeof(long long));
   return h;
 }
@@ -1893,6 +1936,39 @@ void kx_struct_set(long long h, int field, long long val) {
   p[field] = val;
 }
 
+void kx_struct_free(long long h, int fieldCount) {
+  if (!h) return;
+  long long* p = (long long*)h;
+  for (int i = 0; i < fieldCount; i++) {
+    if (p[i]) {
+      kx_collection* c = (kx_collection*)(uintptr_t)p[i];
+      if (c && (c->kind == KX_COLLECTION_LIST || c->kind == KX_COLLECTION_MAP)) {
+        freeHandle(p[i]);
+      }
+    }
+  }
+  free((void*)h);
+}
+
+long long kx_box_struct(long long val, long long size) {
+  void* p = malloc((size_t)size);
+  if (!p) kx_panic("out of memory");
+  memset(p, 0, (size_t)size);
+  memcpy(p, &val, sizeof(long long) < (size_t)size ? sizeof(long long) : (size_t)size);
+  return (long long)(uintptr_t)p;
+}
+
+long long kx_box_struct_full(long long h0, long long h1, long long h2, long long h3, long long size) {
+  void* p = malloc((size_t)size);
+  if (!p) kx_panic("out of memory");
+  long long* buf = (long long*)p;
+  buf[0] = h0;
+  buf[1] = h1;
+  buf[2] = h2;
+  buf[3] = h3;
+  return (long long)(uintptr_t)p;
+}
+
 int kx_str_le(const char* a, const char* b) {
   if (!a) a = "";
   if (!b) b = "";
@@ -1903,4 +1979,73 @@ int kx_str_ge(const char* a, const char* b) {
   if (!a) a = "";
   if (!b) b = "";
   return strcmp(a, b) >= 0;
+}
+
+int kx_str_lt(const char* a, const char* b) {
+  if (!a) a = "";
+  if (!b) b = "";
+  return strcmp(a, b) < 0;
+}
+
+int kx_str_gt(const char* a, const char* b) {
+  if (!a) a = "";
+  if (!b) b = "";
+  return strcmp(a, b) > 0;
+}
+
+/* ---- std functions for self-hosting ---- */
+
+static int g_argc = 0;
+static char** g_argv = NULL;
+
+void kx_save_args(int argc, char** argv) {
+  g_argc = argc;
+  g_argv = argv;
+}
+
+int kx_argc(void) {
+  return g_argc;
+}
+
+char* kx_argv(int i) {
+  if (i < 0 || i >= g_argc) return "";
+  return g_argv[i];
+}
+
+long long kx_args(long long existing_list) {
+  long long list = existing_list ? existing_list : kx_list_new(1);
+  for (int i = 0; i < g_argc; i++) {
+    kx_list_add(list, (long long)(uintptr_t)g_argv[i]);
+  }
+  return list;
+}
+
+char* kx_read_file(const char* path) {
+  FILE* f = fopen(path, "rb");
+  if (!f) return "";
+  fseek(f, 0, SEEK_END);
+  long len = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  char* buf = (char*)malloc(len + 1);
+  if (!buf) { fclose(f); return ""; }
+  fread(buf, 1, len, f);
+  buf[len] = '\0';
+  fclose(f);
+  return buf;
+}
+
+int kx_write_file(const char* path, const char* data) {
+  FILE* f = fopen(path, "wb");
+  if (!f) return 0;
+  fwrite(data, 1, strlen(data), f);
+  fclose(f);
+  return 1;
+}
+
+int kx_print_bytes(const char* s) {
+  const unsigned char* p = (const unsigned char*)(s ? s : "");
+  fprintf(stderr, "bytes:");
+  for (int i = 0; i < 4 && p[i]; i++) fprintf(stderr, " %02x", p[i]);
+  fprintf(stderr, "\n");
+  return 0;
 }

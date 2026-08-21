@@ -349,6 +349,49 @@ bool registryPublish(const std::string& name, const std::string& version,
   return ok;
 }
 
+bool registryPublishSigned(const std::string& name, const std::string& version,
+                           const std::string& archivePath, const std::string& signature,
+                           const std::string& publicKey) {
+  AuthInfo auth = loadAuthToken();
+  if (auth.token.empty()) return false;
+
+  std::string url = getRegistryUrl() + "/packages/" + name + "/" + version;
+
+  for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      std::cerr << "  retrying upload (" << attempt << "/" << MAX_RETRIES << ")...\n";
+      backoffSleep(attempt - 1);
+    }
+
+    std::string cmd = "curl --connect-timeout " + std::to_string(TIMEOUT_SECONDS) +
+                      " --max-time " + std::to_string(TIMEOUT_SECONDS * 6) +
+                      " -X PUT -s -#"
+                      " -H 'Authorization: Bearer " + auth.token + "'"
+                      " -F 'archive=@" + archivePath + "'"
+                      " -F 'signature=" + signature + "'"
+                      " -F 'public_key=" + publicKey + "'"
+                      " -o /dev/null"
+                      " -w '%{http_code}'"
+                      " '" + url + "'";
+
+    std::string statusFile = "/tmp/kubex_curl_status";
+    std::system((cmd + " > " + statusFile + " 2>/dev/null").c_str());
+
+    std::ifstream sin(statusFile);
+    std::ostringstream sss;
+    sss << sin.rdbuf();
+    int status = 0;
+    for (char c : sss.str()) {
+      if (c >= '0' && c <= '9') status = status * 10 + (c - '0');
+    }
+    std::remove(statusFile.c_str());
+
+    if (status == 200 || status == 201) return true;
+    if (status >= 400 && status < 500) return false;
+  }
+  return false;
+}
+
 bool registryDownload(const std::string& name, const std::string& version,
                       const std::string& destPath) {
   std::string url = getRegistryUrl() + "/packages/" + name + "/" + version + "/download";

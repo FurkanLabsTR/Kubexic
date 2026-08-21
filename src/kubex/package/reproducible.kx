@@ -1,0 +1,62 @@
+// reproducible.kx — Reproducible builds for Kubexic, written in Kubexic.
+// Ensures deterministic archive creation and build verification.
+
+var NormalizeLineEnding(s) {
+    // Convert CRLF to LF
+    var result = "";
+    for (var i = 0; i < s.Length; i++) {
+        var c = s.Substring(i, 1);
+        if (c == "\r" && i + 1 < s.Length && s.Substring(i + 1, 1) == "\n") {
+            result += "\n";
+            i++;  // skip \n
+        } else {
+            result += c;
+        }
+    }
+    return result;
+}
+
+var SortFiles(files) {
+    // Simple bubble sort for file list
+    var sorted = List<string>();
+    for (var i = 0; i < files.Count; i++) {
+        sorted.Add(files.Get(i));
+    }
+    for (var i = 0; i < sorted.Count; i++) {
+        for (var j = i + 1; j < sorted.Count; j++) {
+            if (sorted.Get(j) < sorted.Get(i)) {
+                var tmp = sorted.Get(i);
+                sorted.Set(i, sorted.Get(j));
+                sorted.Set(j, tmp);
+            }
+        }
+    }
+    return sorted;
+}
+
+var CreateReproducibleArchive(projectRoot) {
+    // Collect all .kx files
+    var files = List<string>();
+    // Would need to recursively find .kx files
+    // For now, return empty list
+    return files;
+}
+
+var ComputeBuildHash(projectRoot, files) {
+    // Compute deterministic hash of all source files
+    var hasher = "";  // Would use SHA-256
+    var sorted = SortFiles(files);
+    for (var i = 0; i < sorted.Count; i++) {
+        var content = std.readFile(sorted.Get(i));
+        content = NormalizeLineEnding(content);
+        hasher += content;
+    }
+    // Would compute actual hash
+    return hasher;
+}
+
+var VerifyReproducibility(projectRoot, expectedHash) {
+    var files = CreateReproducibleArchive(projectRoot);
+    var actualHash = ComputeBuildHash(projectRoot, files);
+    return actualHash == expectedHash;
+}

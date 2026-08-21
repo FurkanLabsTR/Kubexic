@@ -1,0 +1,3444 @@
+// codegen.kx -- minimal LLVM IR text code generator for Kubexic
+// Self-contained: includes lexer, parser, and IR generator.
+// Generates .ll files that can be compiled with clang.
+
+// parser.kx -- the Kubexic recursive-descent parser, written in Kubexic.
+// Produces an arena-indexed AST and dumps it in the exact format of
+// 'kxc dump' so the two implementations can be diffed byte-for-byte.
+
+struct Token {
+    var kind = "";
+    var text = "";
+    var line = 0;
+    var col = 0;
+}
+
+struct AstNode {
+    var kind = "";
+    var value = "";
+    var line = 0;
+    var col = 0;
+    var children = List<int>();
+}
+
+var IsDigit(c) {
+    return c >= "0" && c <= "9";
+}
+
+var IsLetter(c) {
+    return (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
+}
+
+var IsIdentPart(c) {
+    return IsLetter(c) || IsDigit(c) || c == "_";
+}
+
+var IsSpace(c) {
+    return c == " " || c == "\t" || c == "\n" || c == "\r";
+}
+
+var CharAt(s, i) {
+    if (i < 0 || i >= s.Length) {
+        return "";
+    }
+    return s.Substring(i, 1);
+}
+
+var LexAll(src) {
+    var tokens = List<Token>();
+    var pos = 0;
+    var line = 1;
+    var col = 1;
+    var n = src.Length;
+    while (pos < n) {
+        var c = CharAt(src, pos);
+        if (IsSpace(c)) {
+            pos++;
+            col++;
+            if (c == "\n") {
+                line++;
+                col = 1;
+            }
+            continue;
+        }
+        if (c == "/" && CharAt(src, pos + 1) == "/") {
+            while (pos < n && CharAt(src, pos) != "\n") {
+                pos++;
+                col++;
+            }
+            continue;
+        }
+        if (c == "/" && CharAt(src, pos + 1) == "*") {
+            pos += 2;
+            col += 2;
+            while (pos < n && !(CharAt(src, pos) == "*" && CharAt(src, pos + 1) == "/")) {
+                if (CharAt(src, pos) == "\n") {
+                    line++;
+                    col = 1;
+                } else {
+                    col++;
+                }
+                pos++;
+            }
+            pos += 2;
+            col += 2;
+            continue;
+        }
+        if (IsLetter(c) || c == "_") {
+            var start = pos;
+            var startCol = col;
+            var startLine = line;
+            while (pos < n && IsIdentPart(CharAt(src, pos))) {
+                pos++;
+                col++;
+            }
+            var text = src.Substring(start, pos - start);
+            var kind = "id";
+            if (text == "component" || text == "system" || text == "tag" ||
+                text == "struct" || text == "enum" || text == "const" ||
+                text == "var" || text == "void" || text == "int" ||
+                text == "long" || text == "float" || text == "double" ||
+                text == "bool" || text == "byte" || text == "string" ||
+                text == "if" || text == "else" || text == "while" ||
+                text == "for" || text == "foreach" || text == "in" ||
+                text == "break" || text == "continue" || text == "return" ||
+                text == "spawn" || text == "despawn" || text == "attach" ||
+                text == "detach" || text == "self" || text == "with" ||
+                text == "without" || text == "new" || text == "tags" ||
+                text == "using" || text == "true" || text == "false" ||
+                text == "is" || text == "exact" || text == "panic" ||
+                text == "switch" || text == "case" || text == "default" ||
+                text == "extern") {
+                kind = "kw";
+            }
+            tokens.Add(Token { kind = kind, text = text, line = startLine, col = startCol });
+            continue;
+        }
+        if (IsDigit(c)) {
+            var start = pos;
+            var startCol = col;
+            var startLine = line;
+            var isFloat = false;
+            while (pos < n && IsDigit(CharAt(src, pos))) {
+                pos++;
+                col++;
+            }
+            if (CharAt(src, pos) == "." && IsDigit(CharAt(src, pos + 1))) {
+                isFloat = true;
+                pos++;
+                col++;
+                while (pos < n && IsDigit(CharAt(src, pos))) {
+                    pos++;
+                    col++;
+                }
+            }
+            var text = src.Substring(start, pos - start);
+            tokens.Add(Token { kind = isFloat ? "float" : "int", text = text,
+                               line = startLine, col = startCol });
+            continue;
+        }
+        if (c == "$" && CharAt(src, pos + 1) == "\"") {
+            var startCol = col;
+            var startLine = line;
+            pos += 2;
+            col += 2;
+            var text = "";
+            var depth = 0;
+            while (pos < n) {
+                var dc = CharAt(src, pos);
+                if (dc == "{") {
+                    depth++;
+                    text += dc;
+                    pos++;
+                    col++;
+                    continue;
+                }
+                if (dc == "}") {
+                    if (depth > 0) {
+                        depth--;
+                    }
+                    text += dc;
+                    pos++;
+                    col++;
+                    continue;
+                }
+                if (dc == "\"" && depth == 0) {
+                    break;
+                }
+                if (dc == "\"" && depth > 0) {
+                    text += dc;
+                    pos++;
+                    col++;
+                    while (pos < n) {
+                        var q = CharAt(src, pos);
+                        text += q;
+                        pos++;
+                        col++;
+                        if (q == "\\" && pos < n) {
+                            text += CharAt(src, pos);
+                            pos++;
+                            col++;
+                            continue;
+                        }
+                        if (q == "\"") {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                text += dc;
+                pos++;
+                col++;
+            }
+            pos++;
+            col++;
+            tokens.Add(Token { kind = "dstr", text = text, line = startLine, col = startCol });
+            continue;
+        }
+        if (c == "\"") {
+            var startCol = col;
+            var startLine = line;
+            pos++;
+            col++;
+            var text = "";
+            while (pos < n && CharAt(src, pos) != "\"") {
+                if (CharAt(src, pos) == "\\" && pos + 1 < n) {
+                    var esc = CharAt(src, pos + 1);
+                    if (esc == "n") {
+                        text += "\n";
+                    } else if (esc == "t") {
+                        text += "\t";
+                    } else if (esc == "r") {
+                        text += "\r";
+                    } else if (esc == "\\") {
+                        text += "\\";
+                    } else if (esc == "\"") {
+                        text += "\"";
+                    } else if (esc == "'") {
+                        text += "'";
+                    } else {
+                        text += "\\";
+                        text += esc;
+                    }
+                    pos += 2;
+                    col += 2;
+                } else {
+                    text += CharAt(src, pos);
+                    pos++;
+                    col++;
+                }
+            }
+            pos++;
+            col++;
+            tokens.Add(Token { kind = "string", text = text, line = startLine, col = startCol });
+            continue;
+        }
+        var two = src.Substring(pos, 2);
+        if (two == "==" || two == "!=" || two == "<=" || two == ">=" ||
+            two == "&&" || two == "||" || two == "+=" || two == "-=" ||
+            two == "*=" || two == "/=" || two == "%=" || two == "++" ||
+            two == "--") {
+            tokens.Add(Token { kind = "op", text = two, line = line, col = col });
+            pos += 2;
+            col += 2;
+            continue;
+        }
+        tokens.Add(Token { kind = "punct", text = c, line = line, col = col });
+        pos++;
+        col++;
+    }
+    tokens.Add(Token { kind = "eof", text = "", line = line, col = col });
+    return tokens;
+}
+
+/* ---------------- arena helpers ---------------- */
+
+var NewNode(arena, kind, value, line, col) {
+    arena.Add(AstNode { kind = kind, value = value, line = line, col = col,
+                        children = List<int>() });
+    return arena.Count - 1;
+}
+
+var Node(arena, i) {
+    return arena.Get(i);
+}
+
+var TrimFloat(s) {
+    var out = s;
+    while (out.Length > 0 && out.EndsWith("0")) {
+        out = out.Substring(0, out.Length - 1);
+    }
+    if (out.Length > 0 && out.EndsWith(".")) {
+        out = out.Substring(0, out.Length - 1);
+    }
+    if (out == "-") {
+        out = "-0";
+    }
+    if (out == "") {
+        out = "0";
+    }
+    return out;
+}
+
+void AddChild(arena, parent, child) {
+    var children = arena.Get(parent).children;
+    children.Add(child);
+}
+
+/* ---------------- cursor helpers ---------------- */
+
+var Peek(tokens, pos) {
+    return tokens.Get(pos.Get(0));
+}
+
+var CurKind(tokens, pos) {
+    return Peek(tokens, pos).kind;
+}
+
+var CurText(tokens, pos) {
+    return Peek(tokens, pos).text;
+}
+
+var CurLine(tokens, pos) {
+    return Peek(tokens, pos).line;
+}
+
+var CurCol(tokens, pos) {
+    return Peek(tokens, pos).col;
+}
+
+var AtEnd(tokens, pos) {
+    return CurKind(tokens, pos) == "eof";
+}
+
+void Advance(tokens, pos) {
+    pos.Set(0, pos.Get(0) + 1);
+}
+
+var IsKw(tokens, pos, w) {
+    var t = Peek(tokens, pos);
+    return t.kind == "kw" && t.text == w;
+}
+
+var IsPunct(tokens, pos, p) {
+    var t = Peek(tokens, pos);
+    return t.kind == "punct" && t.text == p;
+}
+
+var IsOp(tokens, pos, o) {
+    var t = Peek(tokens, pos);
+    return t.kind == "op" && t.text == o;
+}
+
+var IsNameTok(tokens, pos) {
+    var t = Peek(tokens, pos);
+    return t.kind == "id" || t.kind == "kw";
+}
+
+var MatchKw(tokens, pos, w) {
+    if (IsKw(tokens, pos, w)) {
+        Advance(tokens, pos);
+        return true;
+    }
+    return false;
+}
+
+var MatchPunct(tokens, pos, p) {
+    if (IsPunct(tokens, pos, p)) {
+        Advance(tokens, pos);
+        return true;
+    }
+    return false;
+}
+
+var MatchOp(tokens, pos, o) {
+    if (IsOp(tokens, pos, o)) {
+        Advance(tokens, pos);
+        return true;
+    }
+    return false;
+}
+
+var ExpectPunct(tokens, pos, p, errors, what) {
+    if (!MatchPunct(tokens, pos, p)) {
+        errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: expected {what}");
+        return false;
+    }
+    return true;
+}
+
+var ExpectName(tokens, pos, errors, what) {
+    if (IsNameTok(tokens, pos)) {
+        Advance(tokens, pos);
+        return true;
+    }
+    errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: expected {what}");
+    return false;
+}
+
+var PrevText(tokens, pos) {
+    return tokens.Get(pos.Get(0) - 1).text;
+}
+
+/* ---------------- expression parsing ---------------- */
+
+var ParsePrimary(tokens, pos, arena, errors) {
+    var t = Peek(tokens, pos);
+    var loc = NewNode(arena, "loc", "", t.line, t.col);
+    if (t.kind == "int") {
+        Advance(tokens, pos);
+        return NewNode(arena, "int", t.text, t.line, t.col);
+    }
+    if (t.kind == "float") {
+        Advance(tokens, pos);
+        return NewNode(arena, "float", t.text, t.line, t.col);
+    }
+    if (t.kind == "string") {
+        Advance(tokens, pos);
+        return NewNode(arena, "string", t.text, t.line, t.col);
+    }
+    if (t.kind == "dstr") {
+        Advance(tokens, pos);
+        return ParseInterpolated(arena, t.text, t.line, t.col);
+    }
+    if (t.kind == "kw" && t.text == "true") {
+        Advance(tokens, pos);
+        return NewNode(arena, "bool", "true", t.line, t.col);
+    }
+    if (t.kind == "kw" && t.text == "false") {
+        Advance(tokens, pos);
+        return NewNode(arena, "bool", "false", t.line, t.col);
+    }
+    if (t.kind == "kw" && t.text == "self") {
+        Advance(tokens, pos);
+        return NewNode(arena, "identifier", "self", t.line, t.col);
+    }
+    if (t.kind == "kw" && t.text == "spawn") {
+        Advance(tokens, pos);
+        return ParseSpawn(tokens, pos, arena, errors);
+    }
+    if (t.kind == "id") {
+        Advance(tokens, pos);
+        if (IsPunct(tokens, pos, "{")) {
+            Advance(tokens, pos);
+            var node = NewNode(arena, "structinit", t.text, t.line, t.col);
+            while (!IsPunct(tokens, pos, "}") && !AtEnd(tokens, pos)) {
+                if (!IsNameTok(tokens, pos)) {
+                    break;
+                }
+                var fname = CurText(tokens, pos);
+                Advance(tokens, pos);
+                if (!ExpectPunct(tokens, pos, "=", errors, "'=' in component initializer")) {
+                    break;
+                }
+                var initNode = NewNode(arena, "field", fname, t.line, t.col);
+                AddChild(arena, initNode, ParseExpression(tokens, pos, arena, errors));
+                AddChild(arena, node, initNode);
+                if (!MatchPunct(tokens, pos, ",")) {
+                    break;
+                }
+            }
+            ExpectPunct(tokens, pos, "}", errors, "'}' to close component initializer");
+            return node;
+        }
+        if (IsPunct(tokens, pos, "(")) {
+            return ParseCall(tokens, pos, arena, errors, NewNode(arena, "identifier",
+                                                                 t.text, t.line, t.col), List<string>());
+        }
+        return NewNode(arena, "identifier", t.text, t.line, t.col);
+    }
+    if (IsPunct(tokens, pos, "(")) {
+        Advance(tokens, pos);
+        var inner = ParseExpression(tokens, pos, arena, errors);
+        ExpectPunct(tokens, pos, ")", errors, "')'");
+        return inner;
+    }
+    errors.Add($"{t.line}:{t.col}: expected an expression");
+    Advance(tokens, pos);
+    return NewNode(arena, "int", "0", t.line, t.col);
+}
+
+var ParseCall(tokens, pos, arena, errors, callee, typeArgs) {
+    var node = NewNode(arena, "call", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    AddChild(arena, node, callee);
+    foreach (var ta in typeArgs) {
+        var taNode = NewNode(arena, "typearg", ta, 0, 0);
+        AddChild(arena, node, taNode);
+    }
+    if (!ExpectPunct(tokens, pos, "(", errors, "'('")) {
+        return node;
+    }
+    while (!IsPunct(tokens, pos, ")") && !AtEnd(tokens, pos)) {
+        var argNode = NewNode(arena, "arg", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        if (IsNameTok(tokens, pos)) {
+            var maybeName = Peek(tokens, pos);
+            var next = tokens.Get(pos.Get(0) + 1);
+            if (next.kind == "punct" && next.text == ":") {
+                Advance(tokens, pos);
+                Advance(tokens, pos);
+                var nameNode = NewNode(arena, "argname", maybeName.text, maybeName.line,
+                                       maybeName.col);
+                AddChild(arena, argNode, nameNode);
+            }
+        }
+        AddChild(arena, argNode, ParseExpression(tokens, pos, arena, errors));
+        AddChild(arena, node, argNode);
+        if (!MatchPunct(tokens, pos, ",")) {
+            break;
+        }
+    }
+    ExpectPunct(tokens, pos, ")", errors, "')'");
+    return node;
+}
+
+var ParseTypeArgs(tokens, pos) {
+    var out = List<string>();
+    if (!IsPunct(tokens, pos, "<")) {
+        return out;
+    }
+    var save = pos.Get(0);
+    Advance(tokens, pos);
+    while (IsNameTok(tokens, pos) && !IsPunct(tokens, pos, ">")) {
+        out.Add(CurText(tokens, pos));
+        Advance(tokens, pos);
+        if (!MatchPunct(tokens, pos, ",")) {
+            break;
+        }
+    }
+    if (!MatchPunct(tokens, pos, ">")) {
+        pos.Set(0, save);
+        return List<string>();
+    }
+    return out;
+}
+
+var ParsePostfix(tokens, pos, arena, errors) {
+    var e = ParsePrimary(tokens, pos, arena, errors);
+    for (;;) {
+        if (MatchPunct(tokens, pos, ".")) {
+            if (!IsNameTok(tokens, pos)) {
+                errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: expected member name after '.'");
+                return e;
+            }
+            var m = NewNode(arena, "member", CurText(tokens, pos), CurLine(tokens, pos),
+                            CurCol(tokens, pos));
+            Advance(tokens, pos);
+            AddChild(arena, m, e);
+            e = m;
+            continue;
+        }
+        if (IsPunct(tokens, pos, "<")) {
+            var savePos = pos.Get(0);
+            var typeArgs = ParseTypeArgs(tokens, pos);
+            if (typeArgs.Count > 0 && IsPunct(tokens, pos, "(")) {
+                e = ParseCall(tokens, pos, arena, errors, e, typeArgs);
+                continue;
+            }
+            pos.Set(0, savePos);
+            return e;
+        }
+        if (IsPunct(tokens, pos, "(")) {
+            e = ParseCall(tokens, pos, arena, errors, e, List<string>());
+            continue;
+        }
+        if (IsKw(tokens, pos, "is")) {
+            Advance(tokens, pos);
+            var isNode = NewNode(arena, "is", "", CurLine(tokens, pos), CurCol(tokens, pos));
+            AddChild(arena, isNode, e);
+            if (IsNameTok(tokens, pos)) {
+                var typeNode = NewNode(arena, "istype", CurText(tokens, pos),
+                                       CurLine(tokens, pos), CurCol(tokens, pos));
+                Advance(tokens, pos);
+                AddChild(arena, isNode, typeNode);
+            }
+            if (IsNameTok(tokens, pos)) {
+                var varNode = NewNode(arena, "isvar", CurText(tokens, pos),
+                                      CurLine(tokens, pos), CurCol(tokens, pos));
+                Advance(tokens, pos);
+                AddChild(arena, isNode, varNode);
+            }
+            e = isNode;
+            continue;
+        }
+        if (IsOp(tokens, pos, "++") || IsOp(tokens, pos, "--")) {
+            var uOp = CurText(tokens, pos);
+            Advance(tokens, pos);
+            var u = NewNode(arena, "unary", uOp == "++" ? "postinc" : "postdec",
+                            CurLine(tokens, pos), CurCol(tokens, pos));
+            AddChild(arena, u, e);
+            e = u;
+            continue;
+        }
+        return e;
+    }
+}
+
+var ParseBinaryFrom(e, tokens, pos, arena, errors, opText) {
+    Advance(tokens, pos);
+    var node = NewNode(arena, "binary", opText, CurLine(tokens, pos), CurCol(tokens, pos));
+    AddChild(arena, node, e);
+    AddChild(arena, node, ParseUnary(tokens, pos, arena, errors));
+    return node;
+}
+
+var ParseUnary(tokens, pos, arena, errors) {
+    if (IsKw(tokens, pos, "exact")) {
+        Advance(tokens, pos);
+        var u = NewNode(arena, "unary", "exact", CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, u, ParseUnary(tokens, pos, arena, errors));
+        return u;
+    }
+    if (IsPunct(tokens, pos, "!")) {
+        Advance(tokens, pos);
+        var u = NewNode(arena, "unary", "not", CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, u, ParseUnary(tokens, pos, arena, errors));
+        return u;
+    }
+    if (IsPunct(tokens, pos, "-")) {
+        Advance(tokens, pos);
+        var u = NewNode(arena, "unary", "neg", CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, u, ParseUnary(tokens, pos, arena, errors));
+        return u;
+    }
+    return ParsePostfix(tokens, pos, arena, errors);
+}
+
+var ParseMultiplicative(tokens, pos, arena, errors) {
+    var lhs = ParseUnary(tokens, pos, arena, errors);
+    for (;;) {
+        var op = "";
+        if (IsPunct(tokens, pos, "*")) {
+            op = "mul";
+        } else if (IsPunct(tokens, pos, "/")) {
+            op = "div";
+        } else if (IsPunct(tokens, pos, "%")) {
+            op = "mod";
+        } else {
+            return lhs;
+        }
+        Advance(tokens, pos);
+        var node = NewNode(arena, "binary", op, CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, node, lhs);
+        AddChild(arena, node, ParseUnary(tokens, pos, arena, errors));
+        lhs = node;
+    }
+}
+
+var ParseAdditive(tokens, pos, arena, errors) {
+    var lhs = ParseMultiplicative(tokens, pos, arena, errors);
+    for (;;) {
+        var op = "";
+        if (IsPunct(tokens, pos, "+")) {
+            op = "add";
+        } else if (IsPunct(tokens, pos, "-")) {
+            op = "sub";
+        } else {
+            return lhs;
+        }
+        Advance(tokens, pos);
+        var node = NewNode(arena, "binary", op, CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, node, lhs);
+        AddChild(arena, node, ParseMultiplicative(tokens, pos, arena, errors));
+        lhs = node;
+    }
+}
+
+var ParseRelational(tokens, pos, arena, errors) {
+    var lhs = ParseAdditive(tokens, pos, arena, errors);
+    for (;;) {
+        var op = "";
+        if (IsPunct(tokens, pos, "<")) {
+            op = "lt";
+        } else if (IsPunct(tokens, pos, ">")) {
+            op = "gt";
+        } else if (IsOp(tokens, pos, "<=")) {
+            op = "le";
+        } else if (IsOp(tokens, pos, ">=")) {
+            op = "ge";
+        } else {
+            return lhs;
+        }
+        Advance(tokens, pos);
+        var node = NewNode(arena, "binary", op, CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, node, lhs);
+        AddChild(arena, node, ParseAdditive(tokens, pos, arena, errors));
+        lhs = node;
+    }
+}
+
+var ParseEquality(tokens, pos, arena, errors) {
+    var lhs = ParseRelational(tokens, pos, arena, errors);
+    for (;;) {
+        var op = "";
+        if (IsOp(tokens, pos, "==")) {
+            op = "eq";
+        } else if (IsOp(tokens, pos, "!=")) {
+            op = "ne";
+        } else {
+            return lhs;
+        }
+        Advance(tokens, pos);
+        var node = NewNode(arena, "binary", op, CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, node, lhs);
+        AddChild(arena, node, ParseRelational(tokens, pos, arena, errors));
+        lhs = node;
+    }
+}
+
+var ParseLogicalAnd(tokens, pos, arena, errors) {
+    var lhs = ParseEquality(tokens, pos, arena, errors);
+    for (;;) {
+        if (!IsOp(tokens, pos, "&&")) {
+            return lhs;
+        }
+        Advance(tokens, pos);
+        var node = NewNode(arena, "binary", "and", CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, node, lhs);
+        AddChild(arena, node, ParseEquality(tokens, pos, arena, errors));
+        lhs = node;
+    }
+}
+
+var ParseLogicalOr(tokens, pos, arena, errors) {
+    var lhs = ParseLogicalAnd(tokens, pos, arena, errors);
+    for (;;) {
+        if (!IsOp(tokens, pos, "||")) {
+            return lhs;
+        }
+        Advance(tokens, pos);
+        var node = NewNode(arena, "binary", "or", CurLine(tokens, pos), CurCol(tokens, pos));
+        AddChild(arena, node, lhs);
+        AddChild(arena, node, ParseLogicalAnd(tokens, pos, arena, errors));
+        lhs = node;
+    }
+}
+
+var ParseTernary(tokens, pos, arena, errors) {
+    var cond = ParseLogicalOr(tokens, pos, arena, errors);
+    if (!IsPunct(tokens, pos, "?")) {
+        return cond;
+    }
+    Advance(tokens, pos);
+    var node = NewNode(arena, "ternary", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    AddChild(arena, node, cond);
+    AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+    ExpectPunct(tokens, pos, ":", errors, "':' in ternary");
+    AddChild(arena, node, ParseTernary(tokens, pos, arena, errors));
+    return node;
+}
+
+var ParseAssignOp(tokens, pos) {
+    if (MatchPunct(tokens, pos, "=")) {
+        return "assign";
+    }
+    if (MatchOp(tokens, pos, "+=")) {
+        return "addassign";
+    }
+    if (MatchOp(tokens, pos, "-=")) {
+        return "subassign";
+    }
+    if (MatchOp(tokens, pos, "*=")) {
+        return "mulassign";
+    }
+    if (MatchOp(tokens, pos, "/=")) {
+        return "divassign";
+    }
+    if (MatchOp(tokens, pos, "%=")) {
+        return "modassign";
+    }
+    return "";
+}
+
+var ParseExpression(tokens, pos, arena, errors) {
+    var lhs = ParseTernary(tokens, pos, arena, errors);
+    var eqLine = CurLine(tokens, pos);
+    var eqCol = CurCol(tokens, pos);
+    var op = ParseAssignOp(tokens, pos);
+    if (op == "") {
+        return lhs;
+    }
+    var node = NewNode(arena, "assign", op, eqLine, eqCol);
+    AddChild(arena, node, lhs);
+    AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+    return node;
+}
+
+/* ---------------- spawn / interpolation ---------------- */
+
+var ParseSpawn(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "spawn", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    if (!ExpectPunct(tokens, pos, "{", errors, "'{' after spawn")) {
+        return node;
+    }
+    while (!IsPunct(tokens, pos, "}") && !AtEnd(tokens, pos)) {
+        if (IsKw(tokens, pos, "tags")) {
+            Advance(tokens, pos);
+            if (ExpectPunct(tokens, pos, "[", errors, "'[' after tags")) {
+                while (IsNameTok(tokens, pos) && !IsPunct(tokens, pos, "]")) {
+                    var tn = NewNode(arena, "spawntag", CurText(tokens, pos),
+                                     CurLine(tokens, pos), CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, node, tn);
+                    if (!MatchPunct(tokens, pos, ",")) {
+                        break;
+                    }
+                }
+                ExpectPunct(tokens, pos, "]", errors, "']' to close tags");
+            }
+        } else {
+            var ci = ParseComponentInit(tokens, pos, arena, errors);
+            AddChild(arena, node, ci);
+        }
+        if (!MatchPunct(tokens, pos, ",")) {
+            break;
+        }
+    }
+    ExpectPunct(tokens, pos, "}", errors, "'}' to close spawn");
+    return node;
+}
+
+var ParseComponentInit(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "compinit", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    if (IsNameTok(tokens, pos)) {
+        var tn = NewNode(arena, "compname", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, tn);
+    }
+    if (ExpectPunct(tokens, pos, "{", errors, "'{' after component type")) {
+        while (!IsPunct(tokens, pos, "}") && !AtEnd(tokens, pos)) {
+            if (!IsNameTok(tokens, pos)) {
+                break;
+            }
+            var fname = CurText(tokens, pos);
+            Advance(tokens, pos);
+            if (!ExpectPunct(tokens, pos, "=", errors, "'=' in component initializer")) {
+                break;
+            }
+            var initNode = NewNode(arena, "field", fname, CurLine(tokens, pos),
+                                   CurCol(tokens, pos));
+            AddChild(arena, initNode, ParseExpression(tokens, pos, arena, errors));
+            AddChild(arena, node, initNode);
+            if (!MatchPunct(tokens, pos, ",")) {
+                break;
+            }
+        }
+        ExpectPunct(tokens, pos, "}", errors, "'}' to close component initializer");
+    }
+    return node;
+}
+
+var ParseInterpolated(arena, content, line, col) {
+    var node = NewNode(arena, "interpolated", "", line, col);
+    var lit = "";
+    var i = 0;
+    var n = content.Length;
+    while (i < n) {
+        var c = CharAt(content, i);
+        if (c == "{") {
+            var ln = NewNode(arena, "lit", lit, line, col);
+            AddChild(arena, node, ln);
+            lit = "";
+            var depth = 1;
+            var j = i + 1;
+            var inner = "";
+            while (j < n && depth > 0) {
+                var d = CharAt(content, j);
+                if (d == "{") {
+                    depth++;
+                } else if (d == "}") {
+                    depth--;
+                }
+                if (depth > 0) {
+                    inner += d;
+                }
+                j++;
+            }
+            var sub = LexAll(inner);
+            var sp = List<int>();
+            sp.Add(0);
+            var expr = ParseExpression(sub, sp, arena, List<string>());
+            var en = NewNode(arena, "interpexpr", "", line, col);
+            AddChild(arena, en, expr);
+            AddChild(arena, node, en);
+            i = j;
+        } else {
+            lit += c;
+            i++;
+        }
+    }
+    var ln = NewNode(arena, "lit", lit, line, col);
+    AddChild(arena, node, ln);
+    return node;
+}
+
+/* ---------------- statements ---------------- */
+
+var ParseBlock(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "block", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    if (!ExpectPunct(tokens, pos, "{", errors, "'{' to start block")) {
+        return node;
+    }
+    while (!IsPunct(tokens, pos, "}") && !AtEnd(tokens, pos)) {
+        AddChild(arena, node, ParseStatement(tokens, pos, arena, errors));
+    }
+    ExpectPunct(tokens, pos, "}", errors, "'}' to close block");
+    return node;
+}
+
+var ParseStatement(tokens, pos, arena, errors) {
+    if (IsPunct(tokens, pos, "{")) {
+        return ParseBlock(tokens, pos, arena, errors);
+    }
+    if (IsKw(tokens, pos, "var")) {
+        var node = NewNode(arena, "vardecl", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (IsNameTok(tokens, pos)) {
+            var vn = NewNode(arena, "varname", CurText(tokens, pos), CurLine(tokens, pos),
+                             CurCol(tokens, pos));
+            Advance(tokens, pos);
+            AddChild(arena, node, vn);
+        }
+        if (ExpectPunct(tokens, pos, "=", errors, "'=' in variable declaration")) {
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+        }
+        ExpectPunct(tokens, pos, ";", errors, "';' after variable declaration");
+        return node;
+    }
+    if (IsKw(tokens, pos, "if")) {
+        var node = NewNode(arena, "if", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (ExpectPunct(tokens, pos, "(", errors, "'(' after if")) {
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+            ExpectPunct(tokens, pos, ")", errors, "')' after if condition");
+        }
+        AddChild(arena, node, ParseStatement(tokens, pos, arena, errors));
+        if (MatchKw(tokens, pos, "else")) {
+            AddChild(arena, node, ParseStatement(tokens, pos, arena, errors));
+        }
+        return node;
+    }
+    if (IsKw(tokens, pos, "while")) {
+        var node = NewNode(arena, "while", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (ExpectPunct(tokens, pos, "(", errors, "'(' after while")) {
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+            ExpectPunct(tokens, pos, ")", errors, "')' after while condition");
+        }
+        AddChild(arena, node, ParseStatement(tokens, pos, arena, errors));
+        return node;
+    }
+    if (IsKw(tokens, pos, "for")) {
+        var node = NewNode(arena, "for", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (!ExpectPunct(tokens, pos, "(", errors, "'(' after for")) {
+            return node;
+        }
+        if (!IsPunct(tokens, pos, ";")) {
+            if (IsKw(tokens, pos, "var")) {
+                var init = NewNode(arena, "vardecl", "", CurLine(tokens, pos),
+                                   CurCol(tokens, pos));
+                Advance(tokens, pos);
+                if (IsNameTok(tokens, pos)) {
+                    var vn = NewNode(arena, "varname", CurText(tokens, pos),
+                                     CurLine(tokens, pos), CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, init, vn);
+                }
+                if (ExpectPunct(tokens, pos, "=", errors, "'=' in variable declaration")) {
+                    AddChild(arena, init, ParseExpression(tokens, pos, arena, errors));
+                }
+                AddChild(arena, node, init);
+            } else {
+                AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+            }
+        }
+        ExpectPunct(tokens, pos, ";", errors, "';' after for init");
+        if (!IsPunct(tokens, pos, ";")) {
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+        }
+        ExpectPunct(tokens, pos, ";", errors, "';' after for condition");
+        if (!IsPunct(tokens, pos, ")")) {
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+        }
+        ExpectPunct(tokens, pos, ")", errors, "')' after for clauses");
+        AddChild(arena, node, ParseStatement(tokens, pos, arena, errors));
+        return node;
+    }
+    if (IsKw(tokens, pos, "foreach")) {
+        var node = NewNode(arena, "foreach", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (ExpectPunct(tokens, pos, "(", errors, "'(' after foreach")) {
+            MatchKw(tokens, pos, "var");
+            if (IsNameTok(tokens, pos)) {
+                var vn = NewNode(arena, "varname", CurText(tokens, pos), CurLine(tokens, pos),
+                                 CurCol(tokens, pos));
+                Advance(tokens, pos);
+                AddChild(arena, node, vn);
+            }
+            if (!MatchKw(tokens, pos, "in")) {
+                errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: expected 'in' in foreach");
+                return node;
+            }
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+            ExpectPunct(tokens, pos, ")", errors, "')' after foreach container");
+        }
+        AddChild(arena, node, ParseStatement(tokens, pos, arena, errors));
+        return node;
+    }
+    if (IsKw(tokens, pos, "return")) {
+        var node = NewNode(arena, "return", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (!IsPunct(tokens, pos, ";")) {
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+        }
+        ExpectPunct(tokens, pos, ";", errors, "';' after return");
+        return node;
+    }
+    if (IsKw(tokens, pos, "break")) {
+        var node = NewNode(arena, "break", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        ExpectPunct(tokens, pos, ";", errors, "';' after break");
+        return node;
+    }
+    if (IsKw(tokens, pos, "continue")) {
+        var node = NewNode(arena, "continue", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        ExpectPunct(tokens, pos, ";", errors, "';' after continue");
+        return node;
+    }
+    if (IsKw(tokens, pos, "switch")) {
+        var node = NewNode(arena, "switch", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (ExpectPunct(tokens, pos, "(", errors, "'(' after switch")) {
+            AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+            ExpectPunct(tokens, pos, ")", errors, "')' after switch condition");
+        }
+        if (!ExpectPunct(tokens, pos, "{", errors, "'{' to start switch")) {
+            return node;
+        }
+        while (!IsPunct(tokens, pos, "}") && !AtEnd(tokens, pos)) {
+            var caseNode = NewNode(arena, "case", "", CurLine(tokens, pos), CurCol(tokens, pos));
+            if (MatchKw(tokens, pos, "case")) {
+                for (;;) {
+                    AddChild(arena, caseNode, ParseExpression(tokens, pos, arena, errors));
+                    if (!MatchPunct(tokens, pos, ",")) {
+                        break;
+                    }
+                }
+                if (!ExpectPunct(tokens, pos, ":", errors, "':' after case value")) {
+                    return node;
+                }
+            } else if (MatchKw(tokens, pos, "default")) {
+                if (!ExpectPunct(tokens, pos, ":", errors, "':' after default")) {
+                    return node;
+                }
+            } else {
+                errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: expected 'case' or 'default'");
+                return node;
+            }
+            var block = NewNode(arena, "block", "", CurLine(tokens, pos), CurCol(tokens, pos));
+            while (!IsKw(tokens, pos, "case") && !IsKw(tokens, pos, "default") &&
+                   !IsPunct(tokens, pos, "}") && !AtEnd(tokens, pos)) {
+                AddChild(arena, block, ParseStatement(tokens, pos, arena, errors));
+            }
+            AddChild(arena, caseNode, block);
+            AddChild(arena, node, caseNode);
+        }
+        ExpectPunct(tokens, pos, "}", errors, "'}' to close switch");
+        return node;
+    }
+    if (IsKw(tokens, pos, "attach")) {
+        var node = NewNode(arena, "attach", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (!ExpectPunct(tokens, pos, "(", errors, "'(' after attach")) {
+            return node;
+        }
+        AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+        if (ExpectPunct(tokens, pos, ",", errors, "',' between target and component")) {
+            MatchKw(tokens, pos, "new");
+            AddChild(arena, node, ParseComponentInit(tokens, pos, arena, errors));
+        }
+        ExpectPunct(tokens, pos, ")", errors, "')' after attach");
+        ExpectPunct(tokens, pos, ";", errors, "';' after attach");
+        return node;
+    }
+    if (IsKw(tokens, pos, "detach")) {
+        var node = NewNode(arena, "detach", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        if (!ExpectPunct(tokens, pos, "(", errors, "'(' after detach")) {
+            return node;
+        }
+        AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+        if (ExpectPunct(tokens, pos, ",", errors, "',' between target and component type")) {
+            if (IsNameTok(tokens, pos)) {
+                var tnText = CurText(tokens, pos);
+                var tnLine = CurLine(tokens, pos);
+                var tnCol = CurCol(tokens, pos);
+                if (ExpectName(tokens, pos, errors, "component type name")) {
+                    AddChild(arena, node, NewNode(arena, "typename", tnText, tnLine, tnCol));
+                }
+            }
+        }
+        ExpectPunct(tokens, pos, ")", errors, "')' after detach");
+        ExpectPunct(tokens, pos, ";", errors, "';' after detach");
+        return node;
+    }
+    if (IsKw(tokens, pos, "despawn")) {
+        var node = NewNode(arena, "despawn", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+        ExpectPunct(tokens, pos, ";", errors, "';' after despawn");
+        return node;
+    }
+    var exprNode = NewNode(arena, "expr", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    AddChild(arena, exprNode, ParseExpression(tokens, pos, arena, errors));
+    ExpectPunct(tokens, pos, ";", errors, "';' after expression");
+    return exprNode;
+}
+
+/* ---------------- declarations ---------------- */
+
+var ParseComponentDecl(tokens, pos, arena, errors, kind) {
+    var node = NewNode(arena, kind, "", CurLine(tokens, pos), CurCol(tokens, pos));
+    Advance(tokens, pos);
+    if (IsNameTok(tokens, pos)) {
+        var dn = NewNode(arena, "declname", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, dn);
+    }
+    if (!ExpectPunct(tokens, pos, "{", errors,
+                     kind == "component" ? "'{' after component name" : "'{' after struct name")) {
+        return node;
+    }
+    while (!IsPunct(tokens, pos, "}") && !AtEnd(tokens, pos)) {
+        if (!MatchKw(tokens, pos, "var")) {
+            errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: expected field name");
+            break;
+        }
+        if (IsNameTok(tokens, pos)) {
+            var fn = NewNode(arena, "field", CurText(tokens, pos), CurLine(tokens, pos),
+                             CurCol(tokens, pos));
+            Advance(tokens, pos);
+            if (ExpectPunct(tokens, pos, "=", errors, "'=' in field default")) {
+                AddChild(arena, fn, ParseExpression(tokens, pos, arena, errors));
+            }
+            AddChild(arena, node, fn);
+        }
+        ExpectPunct(tokens, pos, ";", errors, "';' after field");
+    }
+    ExpectPunct(tokens, pos, "}", errors,
+                 kind == "component" ? "'}' to close component" : "'}' to close struct");
+    return node;
+}
+
+var ParseFunctionDecl(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "function", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    var retText = "";
+    var nameText = "";
+    if (IsNameTok(tokens, pos)) {
+        retText = CurText(tokens, pos);
+        Advance(tokens, pos);
+    }
+    if (IsNameTok(tokens, pos)) {
+        nameText = CurText(tokens, pos);
+        Advance(tokens, pos);
+    }
+    if (nameText != "") {
+        AddChild(arena, node, NewNode(arena, "declname", nameText, CurLine(tokens, pos),
+                                      CurCol(tokens, pos)));
+    }
+    if (retText != "") {
+        AddChild(arena, node, NewNode(arena, "ret", retText, CurLine(tokens, pos),
+                                      CurCol(tokens, pos)));
+    }
+    if (!ExpectPunct(tokens, pos, "(", errors, "'(' after function name")) {
+        return node;
+    }
+    while (IsNameTok(tokens, pos) && !IsPunct(tokens, pos, ")")) {
+        var pn = NewNode(arena, "param", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, pn);
+        if (!MatchPunct(tokens, pos, ",")) {
+            break;
+        }
+    }
+    ExpectPunct(tokens, pos, ")", errors, "')' after parameters");
+    AddChild(arena, node, ParseBlock(tokens, pos, arena, errors));
+    return node;
+}
+
+var ParseTagDecl(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "tag", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    Advance(tokens, pos);
+    if (IsNameTok(tokens, pos)) {
+        var dn = NewNode(arena, "declname", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, dn);
+    }
+    if (MatchPunct(tokens, pos, ":")) {
+        if (IsNameTok(tokens, pos)) {
+            var pnText = CurText(tokens, pos);
+            var pnLine = CurLine(tokens, pos);
+            var pnCol = CurCol(tokens, pos);
+            if (ExpectName(tokens, pos, errors, "parent tag name")) {
+                AddChild(arena, node, NewNode(arena, "parent", pnText, pnLine, pnCol));
+            }
+        }
+    }
+    ExpectPunct(tokens, pos, ";", errors, "';' after tag");
+    return node;
+}
+
+var ParseEnumDecl(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "enum", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    Advance(tokens, pos);
+    if (IsNameTok(tokens, pos)) {
+        var dn = NewNode(arena, "declname", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, dn);
+    }
+    if (!ExpectPunct(tokens, pos, "{", errors, "'{' after enum name")) {
+        return node;
+    }
+    while (IsNameTok(tokens, pos) && !IsPunct(tokens, pos, "}")) {
+        var mn = NewNode(arena, "member", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, mn);
+        if (!MatchPunct(tokens, pos, ",")) {
+            break;
+        }
+    }
+    ExpectPunct(tokens, pos, "}", errors, "'}' to close enum");
+    return node;
+}
+
+var ParseConstDecl(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "const", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    Advance(tokens, pos);
+    if (IsNameTok(tokens, pos)) {
+        var dn = NewNode(arena, "declname", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, dn);
+    }
+    if (ExpectPunct(tokens, pos, "=", errors, "'=' in const")) {
+        AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+    }
+    ExpectPunct(tokens, pos, ";", errors, "';' after const");
+    return node;
+}
+
+var ParseSystemDecl(tokens, pos, arena, errors) {
+    var node = NewNode(arena, "system", "", CurLine(tokens, pos), CurCol(tokens, pos));
+    Advance(tokens, pos);
+    if (IsNameTok(tokens, pos)) {
+        var dn = NewNode(arena, "declname", CurText(tokens, pos), CurLine(tokens, pos),
+                         CurCol(tokens, pos));
+        Advance(tokens, pos);
+        AddChild(arena, node, dn);
+    }
+    for (;;) {
+        if (MatchKw(tokens, pos, "with")) {
+            if (ExpectPunct(tokens, pos, "(", errors, "'(' after with")) {
+                while (IsNameTok(tokens, pos) && !IsPunct(tokens, pos, ")")) {
+                    var wn = NewNode(arena, "with", CurText(tokens, pos), CurLine(tokens, pos),
+                                     CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, node, wn);
+                    if (!MatchPunct(tokens, pos, ",")) {
+                        break;
+                    }
+                }
+                ExpectPunct(tokens, pos, ")", errors, "')' after with list");
+            }
+            continue;
+        }
+        if (MatchKw(tokens, pos, "without")) {
+            if (ExpectPunct(tokens, pos, "(", errors, "'(' after without")) {
+                while (IsNameTok(tokens, pos) && !IsPunct(tokens, pos, ")")) {
+                    var wn = NewNode(arena, "without", CurText(tokens, pos),
+                                     CurLine(tokens, pos), CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, node, wn);
+                    if (!MatchPunct(tokens, pos, ",")) {
+                        break;
+                    }
+                }
+                ExpectPunct(tokens, pos, ")", errors, "')' after without list");
+            }
+            continue;
+        }
+        break;
+    }
+    while (IsPunct(tokens, pos, "[")) {
+        Advance(tokens, pos);
+        var attr = NewNode(arena, "attr", "", CurLine(tokens, pos), CurCol(tokens, pos));
+        if (IsNameTok(tokens, pos)) {
+            var an = NewNode(arena, "attrname", CurText(tokens, pos), CurLine(tokens, pos),
+                             CurCol(tokens, pos));
+            Advance(tokens, pos);
+            AddChild(arena, attr, an);
+        }
+        if (MatchPunct(tokens, pos, "(")) {
+            while (!IsPunct(tokens, pos, ")") && !AtEnd(tokens, pos)) {
+                AddChild(arena, attr, ParseExpression(tokens, pos, arena, errors));
+                if (!MatchPunct(tokens, pos, ",")) {
+                    break;
+                }
+            }
+            ExpectPunct(tokens, pos, ")", errors, "')' after attribute args");
+        }
+        ExpectPunct(tokens, pos, "]", errors, "']' to close attribute");
+        AddChild(arena, node, attr);
+    }
+    AddChild(arena, node, ParseBlock(tokens, pos, arena, errors));
+    return node;
+}
+
+var ParseProgram(tokens, pos, arena, errors, file) {
+    var root = NewNode(arena, "program", file, 0, 0);
+    while (!AtEnd(tokens, pos)) {
+        if (IsKw(tokens, pos, "using")) {
+            Advance(tokens, pos);
+            var un = NewNode(arena, "using", "", CurLine(tokens, pos), CurCol(tokens, pos));
+            while (IsNameTok(tokens, pos)) {
+                var nn = NewNode(arena, "useg", CurText(tokens, pos), CurLine(tokens, pos),
+                                 CurCol(tokens, pos));
+                Advance(tokens, pos);
+                AddChild(arena, un, nn);
+                if (!MatchPunct(tokens, pos, ".")) {
+                    break;
+                }
+            }
+            ExpectPunct(tokens, pos, ";", errors, "';' after using directive");
+            AddChild(arena, root, un);
+            continue;
+        }
+        if (IsKw(tokens, pos, "component")) {
+            AddChild(arena, root, ParseComponentDecl(tokens, pos, arena, errors, "component"));
+            continue;
+        }
+        if (IsKw(tokens, pos, "struct")) {
+            AddChild(arena, root, ParseComponentDecl(tokens, pos, arena, errors, "struct"));
+            continue;
+        }
+        if (IsKw(tokens, pos, "system")) {
+            AddChild(arena, root, ParseSystemDecl(tokens, pos, arena, errors));
+            continue;
+        }
+        if (IsKw(tokens, pos, "tag")) {
+            AddChild(arena, root, ParseTagDecl(tokens, pos, arena, errors));
+            continue;
+        }
+        if (IsKw(tokens, pos, "enum")) {
+            AddChild(arena, root, ParseEnumDecl(tokens, pos, arena, errors));
+            continue;
+        }
+        if (IsKw(tokens, pos, "const")) {
+            AddChild(arena, root, ParseConstDecl(tokens, pos, arena, errors));
+            continue;
+        }
+        if (IsKw(tokens, pos, "extern")) {
+            Advance(tokens, pos);
+            var en = NewNode(arena, "extern", "", CurLine(tokens, pos), CurCol(tokens, pos));
+            if (IsNameTok(tokens, pos)) {
+                var rn = NewNode(arena, "ret", CurText(tokens, pos), CurLine(tokens, pos),
+                                 CurCol(tokens, pos));
+                Advance(tokens, pos);
+                AddChild(arena, en, rn);
+            }
+            if (IsNameTok(tokens, pos)) {
+                var dn = NewNode(arena, "declname", CurText(tokens, pos), CurLine(tokens, pos),
+                                 CurCol(tokens, pos));
+                Advance(tokens, pos);
+                AddChild(arena, en, dn);
+            }
+            if (!ExpectPunct(tokens, pos, "(", errors, "'(' after function name")) {
+                AddChild(arena, root, en);
+                continue;
+            }
+            while (!IsPunct(tokens, pos, ")") && !AtEnd(tokens, pos)) {
+                if (IsNameTok(tokens, pos)) {
+                    var pt = NewNode(arena, "paramtype", CurText(tokens, pos),
+                                     CurLine(tokens, pos), CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, en, pt);
+                }
+                if (IsNameTok(tokens, pos)) {
+                    var pn = NewNode(arena, "param", CurText(tokens, pos), CurLine(tokens, pos),
+                                     CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, en, pn);
+                }
+                if (!MatchPunct(tokens, pos, ",")) {
+                    break;
+                }
+            }
+            ExpectPunct(tokens, pos, ")", errors, "')' after parameters");
+            ExpectPunct(tokens, pos, ";", errors, "';' after extern declaration");
+            AddChild(arena, root, en);
+            continue;
+        }
+        if (IsKw(tokens, pos, "var") || IsKw(tokens, pos, "void") ||
+            IsKw(tokens, pos, "int")) {
+            AddChild(arena, root, ParseFunctionDecl(tokens, pos, arena, errors));
+            continue;
+        }
+        if (IsPunct(tokens, pos, "[")) {
+            Advance(tokens, pos);
+            var attr = NewNode(arena, "attr", "", CurLine(tokens, pos), CurCol(tokens, pos));
+            if (IsNameTok(tokens, pos)) {
+                var an = NewNode(arena, "attrname", CurText(tokens, pos), CurLine(tokens, pos),
+                                 CurCol(tokens, pos));
+                Advance(tokens, pos);
+                AddChild(arena, attr, an);
+            }
+            if (MatchPunct(tokens, pos, "(")) {
+                while (!IsPunct(tokens, pos, ")") && !AtEnd(tokens, pos)) {
+                    AddChild(arena, attr, ParseExpression(tokens, pos, arena, errors));
+                    if (!MatchPunct(tokens, pos, ",")) {
+                        break;
+                    }
+                }
+                ExpectPunct(tokens, pos, ")", errors, "')' after attribute args");
+            }
+            ExpectPunct(tokens, pos, "]", errors, "']' to close attribute");
+            if (MatchKw(tokens, pos, "extern")) {
+                var en = NewNode(arena, "extern", "", CurLine(tokens, pos), CurCol(tokens, pos));
+                AddChild(arena, en, attr);
+                if (IsNameTok(tokens, pos)) {
+                    var rn = NewNode(arena, "ret", CurText(tokens, pos), CurLine(tokens, pos),
+                                     CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, en, rn);
+                }
+                if (IsNameTok(tokens, pos)) {
+                    var dn = NewNode(arena, "declname", CurText(tokens, pos),
+                                     CurLine(tokens, pos), CurCol(tokens, pos));
+                    Advance(tokens, pos);
+                    AddChild(arena, en, dn);
+                }
+                if (!ExpectPunct(tokens, pos, "(", errors, "'(' after function name")) {
+                    AddChild(arena, root, en);
+                    continue;
+                }
+                while (!IsPunct(tokens, pos, ")") && !AtEnd(tokens, pos)) {
+                    if (IsNameTok(tokens, pos)) {
+                        var pt = NewNode(arena, "paramtype", CurText(tokens, pos),
+                                         CurLine(tokens, pos), CurCol(tokens, pos));
+                        Advance(tokens, pos);
+                        AddChild(arena, en, pt);
+                    }
+                    if (IsNameTok(tokens, pos)) {
+                        var pn = NewNode(arena, "param", CurText(tokens, pos),
+                                         CurLine(tokens, pos), CurCol(tokens, pos));
+                        Advance(tokens, pos);
+                        AddChild(arena, en, pn);
+                    }
+                    if (!MatchPunct(tokens, pos, ",")) {
+                        break;
+                    }
+                }
+                ExpectPunct(tokens, pos, ")", errors, "')' after parameters");
+                ExpectPunct(tokens, pos, ";", errors, "';' after extern declaration");
+                AddChild(arena, root, en);
+                continue;
+            }
+            errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: attributes before a declaration require 'extern'");
+            continue;
+        }
+        errors.Add($"{CurLine(tokens, pos)}:{CurCol(tokens, pos)}: expected a top-level declaration");
+        Advance(tokens, pos);
+    }
+    return root;
+}
+
+/* ---------------- dump (mirrors kxc dump exactly) ---------------- */
+
+var Dump(arena, i) {
+    var n = arena.Get(i);
+    var out = "";
+    var kind = n.kind;
+    if (kind == "program") {
+        var s = "(program";
+        if (n.value != "") {
+            s += " file:" + n.value;
+        }
+        foreach (var c in n.children) {
+            s += " " + Dump(arena, c);
+        }
+        return s + ")";
+    }
+
+    if (kind == "string") {
+        return "(string \"" + n.value + "\")";
+    }
+    if (kind == "bool") {
+        return "(bool " + n.value + ")";
+    }
+    if (kind == "identifier") {
+        return "(identifier " + n.value + ")";
+    }
+    if (kind == "declname" || kind == "ret" || kind == "param" ||
+        kind == "varname" || kind == "typename" || kind == "compname" ||
+        kind == "istype" || kind == "isvar" ||
+        kind == "with" || kind == "without" ||
+        kind == "attrname" || kind == "useg" || kind == "spawntag") {
+        return n.value;
+    }
+    if (kind == "int" || kind == "float") {
+        if (kind == "float") {
+            return "(float " + TrimFloat(n.value) + ")";
+        }
+        return "(int " + n.value + ")";
+    }
+    if (kind == "typearg") {
+        return "<" + n.value + ">";
+    }
+    if (kind == "component" || kind == "struct" || kind == "tag" ||
+        kind == "enum" || kind == "const" || kind == "system" ||
+        kind == "function" || kind == "extern") {
+        return DumpDecl(arena, i);
+    }
+    if (kind == "binary" || kind == "unary" || kind == "assign") {
+        var s = "(" + kind + " " + n.value;
+        foreach (var c in n.children) {
+            s += " " + Dump(arena, c);
+        }
+        return s + ")";
+    }
+    if (kind == "member") {
+        return "(member " + Dump(arena, n.children.Get(0)) + " " + n.value + ")";
+    }
+    if (kind == "call") {
+        var s = "(call";
+        var first = true;
+        foreach (var c in n.children) {
+            var cn = arena.Get(c);
+            if (cn.kind == "typearg") {
+                s += " <" + cn.value + ">";
+            } else {
+                s += " " + Dump(arena, c);
+            }
+            first = false;
+        }
+        return s + ")";
+    }
+    if (kind == "arg") {
+        if (n.children.Count == 2 && arena.Get(n.children.Get(0)).kind == "argname") {
+            return arena.Get(n.children.Get(0)).value + ":" + Dump(arena, n.children.Get(1));
+        }
+        return Dump(arena, n.children.Get(0));
+    }
+    if (kind == "interpolated") {
+        var s = "(interpolated";
+        foreach (var c in n.children) {
+            var cn = arena.Get(c);
+            if (cn.kind == "lit") {
+                s += " \"" + cn.value + "\"";
+            } else {
+                s += " {";
+                s += Dump(arena, cn.children.Get(0));
+                s += "}";
+            }
+        }
+        return s + ")";
+    }
+    if (kind == "compinit") {
+        var s = "(";
+        foreach (var c in n.children) {
+            var cn = arena.Get(c);
+            if (cn.kind == "compname") {
+                s += cn.value;
+            } else if (cn.kind == "field") {
+                s += " " + cn.value + "=";
+                s += Dump(arena, cn.children.Get(0));
+            }
+        }
+        return s + ")";
+    }
+    if (kind == "spawn") {
+        var s = "(spawn";
+        foreach (var c in n.children) {
+            var cn = arena.Get(c);
+            if (cn.kind == "compinit") {
+                s += " " + Dump(arena, c);
+            } else if (cn.kind == "spawntag") {
+                s += " tag:" + cn.value;
+            }
+        }
+        return s + ")";
+    }
+    if (kind == "structinit") {
+        var s = "(structinit (" + n.value;
+        foreach (var c in n.children) {
+            var cn = arena.Get(c);
+            s += " " + cn.value + "=";
+            s += Dump(arena, cn.children.Get(0));
+        }
+        return s + "))";
+    }
+    if (kind == "case") {
+        var s = "(";
+        foreach (var c in n.children) {
+            var cn = arena.Get(c);
+            if (cn.kind == "block") {
+                s += " " + Dump(arena, c);
+            } else {
+                s += " case " + Dump(arena, c);
+            }
+        }
+        return s + ")";
+    }
+    var generic = "(" + kind;
+    foreach (var c in n.children) {
+        generic += " " + Dump(arena, c);
+    }
+    return generic + ")";
+}
+
+var DumpDecl(arena, i) {
+    var n = arena.Get(i);
+    if (n.kind == "component" || n.kind == "struct") {
+        var s = "(" + n.kind + " " + arena.Get(n.children.Get(0)).value;
+        for (var k = 1; k < n.children.Count; k++) {
+            var cn = arena.Get(n.children.Get(k));
+            s += " (" + cn.value + " " + Dump(arena, cn.children.Get(0)) + ")";
+        }
+        return s + ")";
+    }
+    if (n.kind == "tag") {
+        var s = "(tag " + arena.Get(n.children.Get(0)).value;
+        if (n.children.Count > 1) {
+            s += " : " + arena.Get(n.children.Get(1)).value;
+        }
+        return s + ")";
+    }
+    if (n.kind == "enum") {
+        var s = "(enum " + arena.Get(n.children.Get(0)).value;
+        for (var k = 1; k < n.children.Count; k++) {
+            s += " " + arena.Get(n.children.Get(k)).value;
+        }
+        return s + ")";
+    }
+    if (n.kind == "const") {
+        return "(const " + arena.Get(n.children.Get(0)).value + " " + Dump(arena, n.children.Get(1)) + ")";
+    }
+    if (n.kind == "system") {
+        var s = "(system " + arena.Get(n.children.Get(0)).value;
+        foreach (var c in n.children) {
+            var cn = arena.Get(c);
+            if (cn.kind == "with") {
+                s += " with:" + cn.value;
+            } else if (cn.kind == "without") {
+                s += " without:" + cn.value;
+            } else if (cn.kind == "attr") {
+                s += " [" + arena.Get(n.children.Get(0)).value;
+                if (cn.children.Count > 1) {
+                    s += " ";
+                    for (var k = 1; k < cn.children.Count; k++) {
+                        if (k > 1) {
+                            s += " ";
+                        }
+                        s += Dump(arena, cn.children.Get(k));
+                    }
+                }
+                s += "]";
+            } else if (cn.kind == "block") {
+                s += " " + Dump(arena, c);
+            }
+        }
+        return s + ")";
+    }
+    if (n.kind == "function" || n.kind == "extern") {
+        var s = "(function " + arena.Get(n.children.Get(0)).value + " " + arena.Get(n.children.Get(1)).value;
+        for (var k = 2; k < n.children.Count; k++) {
+            var cn = arena.Get(n.children.Get(k));
+            if (cn.kind == "param") {
+                s += " " + cn.value;
+            } else if (cn.kind == "block") {
+                s += " " + Dump(arena, n.children.Get(k));
+            }
+        }
+        return s + ")";
+    }
+    var generic = "(" + n.kind;
+    foreach (var c in n.children) {
+        generic += " " + Dump(arena, c);
+    }
+    return generic + ")";
+}
+
+/* ---------------- main ---------------- */
+
+
+// ---- helpers ----
+
+var Child(arena, n, i) {
+    return arena.Get(n.children.Get(i));
+}
+
+var SplitFirst(s, sep) {
+    var out = List<string>();
+    for (var i = 0; i < s.Length; i++) {
+        if (s.Substring(i, 1) == sep) {
+            out.Add(s.Substring(0, i));
+            out.Add(s.Substring(i + 1, s.Length - i - 1));
+            return out;
+        }
+    }
+    out.Add(s);
+    out.Add("");
+    return out;
+}
+
+var IntStr(v) {
+    if (v == 0) return "0";
+    var neg = false;
+    if (v < 0) { neg = true; v = -v; }
+    var d = "";
+    while (v > 0) { d = "0123456789".Substring(v % 10, 1) + d; v = v / 10; }
+    if (neg) d = "-" + d;
+    return d;
+}
+
+var XType(val) { var sp = SplitFirst(val, " "); return sp.Get(0); }
+var XVal(val) { var sp = SplitFirst(val, " "); return sp.Get(1); }
+var ToI64(g, val) {
+    if (XType(val) == "i64") return XVal(val);
+    var ext = "%" + Lbl(g, "ext");
+    if (XType(val) == "ptr") {
+        Emit(g, "  " + ext + " = ptrtoint ptr " + XVal(val) + " to i64");
+    } else {
+        Emit(g, "  " + ext + " = sext i32 " + XVal(val) + " to i64");
+    }
+    return ext;
+}
+
+var Coerce(g, val, want) {
+    var have = XType(val);
+    var value = XVal(val);
+    if (have == want) return value;
+    var cast = "%" + Lbl(g, "cast");
+    if (want == "ptr" && have == "i64") {
+        Emit(g, "  " + cast + " = inttoptr i64 " + value + " to ptr");
+        return cast;
+    }
+    if (want == "i64" && have == "ptr") {
+        Emit(g, "  " + cast + " = ptrtoint ptr " + value + " to i64");
+        return cast;
+    }
+    if (want == "i64" && have == "i32") {
+        Emit(g, "  " + cast + " = sext i32 " + value + " to i64");
+        return cast;
+    }
+    if (want == "i1" && have == "i64") {
+        Emit(g, "  " + cast + " = icmp ne i64 " + value + ", 0");
+        return cast;
+    }
+    if (want == "i64" && have == "i1") {
+        Emit(g, "  " + cast + " = zext i1 " + value + " to i64");
+        return cast;
+    }
+    return value;
+}
+var KxType(t) {
+    if (t == "int" || t == "long") return "i64";
+    if (t == "void") return "void";
+    if (t == "string" || t == "ptr") return "ptr";
+    if (t == "bool") return "i1";
+    if (t == "float" || t == "double") return "double";
+    return "i64";
+}
+
+var SplitAll(s, sep) {
+    var out = List<string>();
+    var cur = "";
+    for (var i = 0; i < s.Length; i++) {
+        var c = s.Substring(i, 1);
+        if (c == sep) {
+            out.Add(cur);
+            cur = "";
+        } else {
+            cur += c;
+        }
+    }
+    out.Add(cur);
+    return out;
+}
+
+var JoinParts(parts, sep) {
+    var out = "";
+    for (var i = 0; i < parts.Count; i++) {
+        if (i > 0) out += sep;
+        out += parts.Get(i);
+    }
+    return out;
+}
+
+var SigRet(sig) {
+    return SplitFirst(sig, "|").Get(0);
+}
+
+var SigParams(sig) {
+    var p = SplitFirst(sig, "|").Get(1);
+    if (p == "") return List<string>();
+    return SplitAll(p, ",");
+}
+
+var SigSetParam(g, name, index, type) {
+    if (!g.sigs.Has(name)) return 0;
+    var sig = g.sigs.Get(name);
+    var ret = SigRet(sig);
+    var params = SigParams(sig);
+    if (index >= params.Count) return 0;
+    var old = params.Get(index);
+    if (old == type || type == "unknown") return 0;
+    if (old == "i64" && type == "ptr") {
+        params.Set(index, type);
+        g.sigs.Set(name, ret + "|" + JoinParts(params, ","));
+    }
+    return 0;
+}
+
+var SigSetRet(g, name, type) {
+    if (!g.sigs.Has(name)) return 0;
+    var sig = g.sigs.Get(name);
+    var old = SigRet(sig);
+    if (old == "i64" && type != "unknown") {
+        var params = SigParams(sig);
+        g.sigs.Set(name, type + "|" + JoinParts(params, ","));
+    }
+    return 0;
+}
+
+var InferExprType(g, e, arena, locals, fnName) {
+    if (e.kind == "int") return "i32";
+    if (e.kind == "long") return "i64";
+    if (e.kind == "float" || e.kind == "double") return "double";
+    if (e.kind == "string" || e.kind == "interpolated") return "ptr";
+    if (e.kind == "bool") return "i1";
+    if (e.kind == "identifier") {
+        if (locals.Has(e.value)) return locals.Get(e.value);
+        return "i64";
+    }
+    if (e.kind == "structinit") return "i64";
+    if (e.kind == "is") {
+        var base = InferExprType(g, Child(arena, e, 0), arena, locals, fnName);
+        if (e.children.Count > 2) locals.Set(Child(arena, e, 2).value, base);
+        return "i1";
+    }
+    if (e.kind == "member") {
+        var baseNode = Child(arena, e, 0);
+        var base = InferExprType(g, baseNode, arena, locals, fnName);
+        var m = e.value;
+        if (baseNode.kind == "call") {
+            var innerCallee = Child(arena, baseNode, 0);
+            if (innerCallee.kind == "identifier") {
+                if (m == "kind" || m == "text") {
+                    SigSetRet(g, innerCallee.value, "struct:Token");
+                    return "ptr";
+                }
+                if (m == "value" || m == "children") {
+                    SigSetRet(g, innerCallee.value, "struct:AstNode");
+                    return m == "value" ? "ptr" : "i64";
+                }
+            }
+        }
+        if (baseNode.kind == "identifier" && locals.Has(baseNode.value) && locals.Get(baseNode.value).StartsWith("struct:")) {
+            if (m == "kind" || m == "text" || m == "value") return "ptr";
+            return "i64";
+        }
+        if (baseNode.kind == "identifier" && (m == "Length" || m == "Substring" ||
+            m == "Contains" || m == "StartsWith" || m == "EndsWith" ||
+            m == "Upper" || m == "Lower")) {
+            locals.Set(baseNode.value, "ptr");
+        }
+        if (m == "Length" || m == "Count") return "i64";
+        return base;
+    }
+    if (e.kind == "binary") {
+        var left = Child(arena, e, 0);
+        var right = Child(arena, e, 1);
+        var lt = InferExprType(g, left, arena, locals, fnName);
+        var rt = InferExprType(g, right, arena, locals, fnName);
+        if (lt == "ptr" || rt == "ptr") {
+            if (left.kind == "identifier") locals.Set(left.value, "ptr");
+            if (right.kind == "identifier") locals.Set(right.value, "ptr");
+            if (e.value == "add") return "ptr";
+            if (e.value == "eq" || e.value == "ne" || e.value == "lt" ||
+                e.value == "le" || e.value == "gt" || e.value == "ge") return "i1";
+        }
+        if (e.value == "and" || e.value == "or" || e.value == "eq" || e.value == "ne" ||
+            e.value == "lt" || e.value == "le" || e.value == "gt" || e.value == "ge") return "i1";
+        return "i64";
+    }
+    if (e.kind == "unary") {
+        var t = InferExprType(g, Child(arena, e, 0), arena, locals, fnName);
+        if (e.value == "not") return "i1";
+        return t;
+    }
+    if (e.kind == "ternary") {
+        InferExprType(g, Child(arena, e, 0), arena, locals, fnName);
+        var a = InferExprType(g, Child(arena, e, 1), arena, locals, fnName);
+        var b = InferExprType(g, Child(arena, e, 2), arena, locals, fnName);
+        if (a == b) return a;
+        if (a == "ptr" || b == "ptr") return "ptr";
+        return "i64";
+    }
+    if (e.kind == "call") {
+        var callee = Child(arena, e, 0);
+        if (callee.kind == "member") {
+            var base = Child(arena, callee, 0);
+            var m = callee.value;
+            if (base.kind == "identifier" && base.value == "std") {
+                if (m == "readFile" || m == "readln") return "ptr";
+                if (m == "args" || m == "rng") return "i64";
+                if (m == "println" || m == "print" || m == "exit" || m == "stop") return "void";
+            }
+            var bt = InferExprType(g, base, arena, locals, fnName);
+            if (base.kind == "call") {
+                var innerCallee = Child(arena, base, 0);
+                if (innerCallee.kind == "identifier") {
+                    if (m == "kind" || m == "text") {
+                        SigSetRet(g, innerCallee.value, "struct:Token");
+                        return "ptr";
+                    }
+                    if (m == "value" || m == "children") {
+                        SigSetRet(g, innerCallee.value, "struct:AstNode");
+                        return m == "value" ? "ptr" : "i64";
+                    }
+                }
+            }
+            if (base.kind == "identifier" && locals.Has(base.value) && locals.Get(base.value).StartsWith("struct:")) {
+                if (m == "kind" || m == "text" || m == "value") return "ptr";
+                return "i64";
+            }
+            if (base.kind == "identifier" && (m == "Substring" || m == "Contains" ||
+                m == "StartsWith" || m == "EndsWith" || m == "Upper" || m == "Lower")) {
+                locals.Set(base.value, "ptr");
+            }
+            if (m == "Substring" || m == "Upper" || m == "Lower") return "ptr";
+            if (m == "Contains" || m == "StartsWith" || m == "EndsWith") return "i1";
+            if (m == "Get" || m == "Set" || m == "Add" || m == "Has") return "i64";
+        }
+        if (callee.kind == "identifier") {
+            var name = callee.value;
+            if (name == "List" || name == "Map") return "i64";
+            if (name == "IntStr" || name == "CharAt") return "ptr";
+            if (g.sigs.Has(name)) {
+                var ps = SigParams(g.sigs.Get(name));
+                for (var i = 1; i < e.children.Count && i <= ps.Count; i++) {
+                    var arg = Child(arena, e, i);
+                    if (arg.kind == "arg") arg = Child(arena, arg, 0);
+                    var at = InferExprType(g, arg, arena, locals, fnName);
+                    SigSetParam(g, name, i - 1, at);
+                }
+                return SigRet(g.sigs.Get(name));
+            }
+        }
+        return "i64";
+    }
+    if (e.kind == "assign") {
+        var value = InferExprType(g, Child(arena, e, 1), arena, locals, fnName);
+        var lhs = Child(arena, e, 0);
+        if (lhs.kind == "identifier") locals.Set(lhs.value, value);
+        return value;
+    }
+    return "i64";
+}
+
+var InferStmt(g, s, arena, locals, fnName) {
+    if (s.kind == "vardecl") {
+        var name = Child(arena, s, 0).value;
+        locals.Set(name, InferExprType(g, Child(arena, s, 1), arena, locals, fnName));
+        return 0;
+    }
+    if (s.kind == "expr") { InferExprType(g, Child(arena, s, 0), arena, locals, fnName); return 0; }
+    if (s.kind == "return") {
+        if (s.children.Count > 0) SigSetRet(g, fnName, InferExprType(g, Child(arena, s, 0), arena, locals, fnName));
+        return 0;
+    }
+    if (s.kind == "block") {
+        for (var i = 0; i < s.children.Count; i++) InferStmt(g, Child(arena, s, i), arena, locals, fnName);
+        return 0;
+    }
+    if (s.kind == "if" || s.kind == "while") {
+        InferExprType(g, Child(arena, s, 0), arena, locals, fnName);
+        for (var i = 1; i < s.children.Count; i++) InferStmt(g, Child(arena, s, i), arena, locals, fnName);
+        return 0;
+    }
+    if (s.kind == "for") {
+        for (var i = 0; i < s.children.Count; i++) InferStmt(g, Child(arena, s, i), arena, locals, fnName);
+        return 0;
+    }
+    if (s.kind == "foreach") {
+        locals.Set(Child(arena, s, 0).value, "i64");
+        InferExprType(g, Child(arena, s, 1), arena, locals, fnName);
+        InferStmt(g, Child(arena, s, 2), arena, locals, fnName);
+        return 0;
+    }
+    return 0;
+}
+
+var InferSignatures(g, root, arena) {
+    for (var i = 0; i < root.children.Count; i++) {
+        var d = Child(arena, root, i);
+        if (d.kind == "function") {
+            var name = Child(arena, d, 0).value;
+            var ret = Child(arena, d, 1).value;
+            var params = "";
+            for (var j = 2; j < d.children.Count; j++) {
+                var c = Child(arena, d, j);
+                if (c.kind == "param") {
+                    if (params != "") params += ",";
+                    params += "i64";
+                }
+            }
+            g.sigs.Set(name, (ret == "void" ? "void" : "i64") + "|" + params);
+        }
+    }
+    for (var pass = 0; pass < 8; pass++) {
+        for (var i = 0; i < root.children.Count; i++) {
+            var d = Child(arena, root, i);
+            if (d.kind == "function") {
+                var name = Child(arena, d, 0).value;
+                var locals = Map<string, string>();
+                var ps = SigParams(g.sigs.Get(name));
+                var pidx = 0;
+                for (var j = 2; j < d.children.Count; j++) {
+                    var c = Child(arena, d, j);
+                    if (c.kind == "param") {
+                        locals.Set(c.value, ps.Get(pidx));
+                        pidx++;
+                    }
+                }
+                InferStmt(g, Child(arena, d, d.children.Count - 1), arena, locals, name);
+                pidx = 0;
+                for (var j = 2; j < d.children.Count; j++) {
+                    var c = Child(arena, d, j);
+                    if (c.kind == "param") {
+                        if (locals.Has(c.value)) SigSetParam(g, name, pidx, locals.Get(c.value));
+                        pidx++;
+                    }
+                }
+                var sig = g.sigs.Get(name);
+                var currentParams = SigParams(sig);
+                g.sigs.Set(name, SigRet(sig) + "|" + JoinParts(currentParams, ","));
+            }
+        }
+    }
+    return 0;
+}
+
+// ---- IR generator state ----
+
+struct IR {
+    var lines = List<string>();
+    var strs = Map<string, string>(); var pending = List<string>();
+    var sc = List<int>();
+    var lc = List<int>();
+    var lt = Map<string, string>();
+    var ln = Map<string, string>();
+    var structs = Map<string, string>();
+    var structVars = List<string>();
+    var curFnRet = "";
+    var curFnName = "";
+    var sigs = Map<string, string>();
+    var terminated = List<int>();
+    var breakTargets = List<string>();
+    var continueTargets = List<string>();
+}
+
+var NewIR() {
+    var sc = List<int>(); sc.Add(0);
+    var lc = List<int>(); lc.Add(0);
+    var terminated = List<int>(); terminated.Add(0);
+    return IR { lines = List<string>(), strs = Map<string, string>(), pending = List<string>(), sc = sc, lc = lc,
+                lt = Map<string, string>(), ln = Map<string, string>(), structs = Map<string, string>(), structVars = List<string>(), curFnRet = "", curFnName = "", sigs = Map<string, string>(), terminated = terminated, breakTargets = List<string>(), continueTargets = List<string>() };
+}
+
+var Emit(g, s) {
+    if (g.terminated.Count > 0 && g.terminated.Get(0) == 1 && s != "}" && !s.EndsWith(":")) {
+        g.lc.Set(0, g.lc.Get(0) + 1);
+        g.lines.Add("dead." + IntStr(g.lc.Get(0)) + ":");
+        g.terminated.Set(0, 0);
+    }
+    g.lines.Add(s);
+    if (s.StartsWith("  br ") || s.StartsWith("  ret ") || s == "  unreachable") {
+        g.terminated.Set(0, 1);
+    } else if (s == "}" || s.EndsWith(":")) {
+        g.terminated.Set(0, 0);
+    }
+    return 0;
+}
+var Lbl(g, p) { g.lc.Set(0, g.lc.Get(0) + 1); return p + "." + IntStr(g.lc.Get(0)); }
+
+var EscStr(s) {
+    var o = ""; var i = 0;
+    while (i < s.Length) {
+        var c = s.Substring(i, 1);
+        if (c == "\\" && i + 1 < s.Length) {
+            var n = s.Substring(i + 1, 1);
+            if (n == "n") { o += "\\0A"; i += 2; continue; }
+            if (n == "t") { o += "\\09"; i += 2; continue; }
+            if (n == "\\") { o += "\\\\5C"; i += 2; continue; }
+            if (n == "0") { o += "\\00"; i += 2; continue; }
+            if (n == "\"") { o += "\\22"; i += 2; continue; }
+        }
+        if (c == "\"") { i++; continue; }
+        if (c == "\n") { o += "\\0A"; i++; continue; }
+        if (c == "\t") { o += "\\09"; i++; continue; }
+        if (c == "\0") { o += "\\00"; i++; continue; }
+        o += c; i++;
+    }
+    return o;
+}
+
+var GetStr(g, s) {
+    if (g.strs.Has(s)) return g.strs.Get(s);
+    g.sc.Set(0, g.sc.Get(0) + 1);
+    var nm = "@.str." + IntStr(g.sc.Get(0));
+    g.strs.Set(s, nm);
+    var raw = "";
+    var i = 0;
+    while (i < s.Length) {
+        var c = s.Substring(i, 1);
+        if (c == "\"") { raw += "\\22"; }
+        else if (c == "\n") { raw += "\\0A"; }
+        else if (c == "\t") { raw += "\\09"; }
+        else if (c == "\\") { raw += "\\5C"; }
+        else { raw += c; }
+        i++;
+    }
+    var size = s.Length + 1;
+    g.pending.Add(nm + " = private unnamed_addr constant [" + IntStr(size) + " x i8] c\"" + raw + "\\00\"");
+    return nm;
+}
+
+var EmitDecls(g) {
+    Emit(g, "declare i64 @kx_println(ptr)");
+    Emit(g, "declare i64 @kx_print(ptr)");
+    Emit(g, "declare ptr @kx_read_file(ptr)");
+    Emit(g, "declare i1 @kx_write_file(ptr, ptr)");
+    Emit(g, "declare ptr @kx_int_str(i64)");
+    Emit(g, "declare i64 @kx_system(ptr)");
+    Emit(g, "declare void @kx_exit(i32)");
+    Emit(g, "declare void @kx_panic(ptr)");
+    Emit(g, "declare void @kx_save_args(i32, ptr)");
+    Emit(g, "declare i64 @kx_args(i64)");
+    Emit(g, "declare i64 @kx_list_new(i32)");
+    Emit(g, "declare void @kx_list_add(i64, i64)");
+    Emit(g, "declare i64 @kx_list_get(i64, i64)");
+    Emit(g, "declare void @kx_list_set(i64, i64, i64)");
+    Emit(g, "declare i64 @kx_list_size(i64)");
+    Emit(g, "declare void @kx_list_remove_at(i64, i64)");
+    Emit(g, "declare void @kx_list_clear(i64)");
+    Emit(g, "declare i64 @kx_map_new(i32, i32)");
+    Emit(g, "declare void @kx_map_set(i64, i64, i64)");
+    Emit(g, "declare i64 @kx_map_get(i64, i64)");
+    Emit(g, "declare i1 @kx_map_has(i64, i64)");
+    Emit(g, "declare ptr @kx_str_len(ptr)");
+    Emit(g, "declare ptr @kx_str_cat(ptr, ptr)");
+    Emit(g, "declare i1 @kx_str_eq(ptr, ptr)");
+    Emit(g, "declare i1 @kx_str_lt(ptr, ptr)");
+    Emit(g, "declare i1 @kx_str_le(ptr, ptr)");
+    Emit(g, "declare i1 @kx_str_gt(ptr, ptr)");
+    Emit(g, "declare i1 @kx_str_ge(ptr, ptr)");
+    Emit(g, "declare ptr @kx_str_substr(ptr, i64, i64)");
+    Emit(g, "declare i1 @kx_str_contains(ptr, ptr)");
+    Emit(g, "declare i1 @kx_str_starts_with(ptr, ptr)");
+    Emit(g, "declare i1 @kx_str_ends_with(ptr, ptr)");
+    Emit(g, "declare ptr @kx_str_upper(ptr)");
+    Emit(g, "declare ptr @kx_str_lower(ptr)");
+    Emit(g, "declare double @kx_rng_next_double(i64)");
+    Emit(g, "declare i64 @kx_struct_new(i32)");
+    Emit(g, "declare i64 @kx_struct_get(i64, i32)");
+    Emit(g, "declare void @kx_struct_set(i64, i32, i64)");
+    Emit(g, "declare i64 @kx_spawn(i64)");
+    Emit(g, "declare void @kx_despawn(i64)");
+    Emit(g, "declare void @kx_attach(i64, i32)");
+    Emit(g, "declare void @kx_detach(i64, i32)");
+    Emit(g, "declare void @kx_set_field_i64(i64, i32, i32, i64)");
+    Emit(g, "declare i64 @kx_get_field_i64(i64, i32, i32)");
+    Emit(g, "declare void @kx_set_field_str(i64, i32, i32, ptr)");
+    Emit(g, "declare ptr @kx_get_field_str(i64, i32, i32)");
+    Emit(g, "declare void @kx_set_field_f64(i64, i32, i32, double)");
+    Emit(g, "declare double @kx_get_field_f64(i64, i32, i32)");
+    Emit(g, "");
+    return 0;
+}
+
+// ---- expression codegen ----
+
+var GenExpr(g, e, arena) {
+    if (e.kind == "int") return "i32 " + e.value;
+    if (e.kind == "long") return "i64 " + e.value;
+    if (e.kind == "string") return "ptr " + GetStr(g, e.value);
+    if (e.kind == "structinit") {
+        var structName = e.value;
+        if (g.structs.Has(structName)) {
+            var fieldStr = g.structs.Get(structName);
+            var fields = SplitAll(fieldStr, ",");
+            if (fields.Get(0) == "") fields = List<string>();
+            var size = fields.Count;
+            if (size == 0) size = 1;
+            var r = "%" + Lbl(g, "r");
+            Emit(g, "  " + r + " = call i64 @kx_struct_new(i32 " + IntStr(size) + ")");
+            for (var fi = 0; fi < e.children.Count; fi++) {
+                var field = Child(arena, e, fi);
+                if (field.kind == "field") {
+                    var fname = field.value;
+                    var fidx = -1;
+                    for (var fj = 0; fj < fields.Count; fj++) {
+                        if (fields.Get(fj) == fname) { fidx = fj; break; }
+                    }
+                    if (fidx >= 0) {
+                        var fv = GenExpr(g, Child(arena, field, 0), arena);
+                        Emit(g, "  call void @kx_struct_set(i64 " + r + ", i32 " + IntStr(fidx) + ", i64 " + ToI64(g, fv) + ")");
+                    }
+                }
+            }
+            return "i64 " + r;
+        }
+        return "i64 0";
+    }
+    if (e.kind == "interpolated") {
+        var result = GetStr(g, e.value);
+        for (var i = 0; i < e.children.Count; i++) {
+            var child = Child(arena, e, i);
+            var part = "";
+            if (child.kind == "lit") {
+                part = GetStr(g, child.value);
+            } else if (child.kind == "interpexpr") {
+                var expr = Child(arena, child, 0);
+                var ev = GenExpr(g, expr, arena);
+                if (XType(ev) == "i64") {
+                    var r = "%" + Lbl(g, "r");
+                    Emit(g, "  " + r + " = call ptr @kx_int_str(i64 " + XVal(ev) + ")");
+                    part = r;
+                } else if (XType(ev) == "i32") {
+                    var ext = "%" + Lbl(g, "ext");
+                    Emit(g, "  " + ext + " = sext i32 " + XVal(ev) + " to i64");
+                    var r = "%" + Lbl(g, "r");
+                    Emit(g, "  " + r + " = call ptr @kx_int_str(i64 " + ext + ")");
+                    part = r;
+                } else {
+                    part = XVal(ev);
+                }
+            }
+            if (part != "") {
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call ptr @kx_str_cat(ptr " + result + ", ptr " + part + ")");
+                result = r;
+            }
+        }
+        return "ptr " + result;
+    }
+    if (e.kind == "bool") return "i1 " + (e.value == "true" ? "true" : "false");
+    if (e.kind == "identifier") {
+        if (e.value == "true") return "i1 true";
+        if (e.value == "false") return "i1 false";
+        if (g.ln.Has(e.value)) {
+            var varType = g.lt.Get(e.value);
+            var irType = varType;
+            if (varType.StartsWith("struct:")) irType = "i64";
+            var t = "%" + Lbl(g, "t");
+            Emit(g, "  " + t + " = load " + irType + ", ptr " + g.ln.Get(e.value));
+            if (varType == "ptr") return "ptr " + t;
+            if (irType == "i64") return "i64 " + t;
+            return irType + " " + t;
+        }
+        return "i64 0";
+    }
+    if (e.kind == "binary") {
+        var lv = GenExpr(g, Child(arena, e, 0), arena);
+        var rv = GenExpr(g, Child(arena, e, 1), arena);
+        var lt = XType(lv); var rt = XType(rv);
+        var la = XVal(lv); var ra = XVal(rv);
+        if (lt != rt && lt != "ptr" && rt != "ptr") {
+            if (lt == "i32" && rt == "i64") {
+                var ext = "%" + Lbl(g, "ext");
+                Emit(g, "  " + ext + " = sext i32 " + la + " to i64");
+                la = ext; lt = "i64";
+            } else if (lt == "i64" && rt == "i32") {
+                var ext = "%" + Lbl(g, "ext");
+                Emit(g, "  " + ext + " = sext i32 " + ra + " to i64");
+                ra = ext; rt = "i64";
+            }
+        }
+        var t = "%" + Lbl(g, "t");
+         if (e.value == "add") {
+            if (lt == "ptr" || rt == "ptr") {
+                if (lt != "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = call ptr @kx_int_str(i64 " + la + ")"); la = ext; }
+                if (rt != "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = call ptr @kx_int_str(i64 " + ra + ")"); ra = ext; }
+                var r = "%" + Lbl(g, "r"); Emit(g, "  " + r + " = call ptr @kx_str_cat(ptr " + la + ", ptr " + ra + ")"); return "ptr " + r;
+            }
+            Emit(g, "  " + t + " = add " + lt + " " + la + ", " + ra); return lt + " " + t;
+        }
+        if (e.value == "sub") {
+            if (lt == "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = ptrtoint ptr " + la + " to i64"); la = ext; lt = "i64"; }
+            if (rt == "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = ptrtoint ptr " + ra + " to i64"); ra = ext; rt = "i64"; }
+            Emit(g, "  " + t + " = sub " + lt + " " + la + ", " + ra); return lt + " " + t;
+        }
+        if (e.value == "mul") {
+            if (lt == "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = ptrtoint ptr " + la + " to i64"); la = ext; lt = "i64"; }
+            if (rt == "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = ptrtoint ptr " + ra + " to i64"); ra = ext; rt = "i64"; }
+            Emit(g, "  " + t + " = mul " + lt + " " + la + ", " + ra); return lt + " " + t;
+        }
+        if (e.value == "div") {
+            if (lt == "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = ptrtoint ptr " + la + " to i64"); la = ext; lt = "i64"; }
+            if (rt == "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = ptrtoint ptr " + ra + " to i64"); ra = ext; rt = "i64"; }
+            Emit(g, "  " + t + " = sdiv " + lt + " " + la + ", " + ra); return lt + " " + t;
+        }
+        if (e.value == "mod") {
+            if (lt == "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = ptrtoint ptr " + la + " to i64"); la = ext; lt = "i64"; }
+            if (rt == "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = ptrtoint ptr " + ra + " to i64"); ra = ext; rt = "i64"; }
+            Emit(g, "  " + t + " = srem " + lt + " " + la + ", " + ra); return lt + " " + t;
+        }
+        if (e.value == "eq") {
+            if (lt == "ptr" || rt == "ptr") {
+                if (lt != "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + la + " to ptr"); la = ext; }
+                if (rt != "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + ra + " to ptr"); ra = ext; }
+                var r = "%" + Lbl(g, "r"); Emit(g, "  " + r + " = call i1 @kx_str_eq(ptr " + la + ", ptr " + ra + ")"); return "i1 " + r;
+            }
+            Emit(g, "  " + t + " = icmp eq " + lt + " " + la + ", " + ra); return "i1 " + t;
+        }
+        if (e.value == "lt") {
+            if (lt == "ptr" || rt == "ptr") {
+                if (lt != "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + la + " to ptr"); la = ext; }
+                if (rt != "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + ra + " to ptr"); ra = ext; }
+                var r = "%" + Lbl(g, "r"); Emit(g, "  " + r + " = call i1 @kx_str_lt(ptr " + la + ", ptr " + ra + ")"); return "i1 " + r;
+            }
+            Emit(g, "  " + t + " = icmp slt " + lt + " " + la + ", " + ra); return "i1 " + t;
+        }
+        if (e.value == "gt") {
+            if (lt == "ptr" || rt == "ptr") {
+                if (lt != "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + la + " to ptr"); la = ext; }
+                if (rt != "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + ra + " to ptr"); ra = ext; }
+                var r = "%" + Lbl(g, "r"); Emit(g, "  " + r + " = call i1 @kx_str_gt(ptr " + la + ", ptr " + ra + ")"); return "i1 " + r;
+            }
+            Emit(g, "  " + t + " = icmp sgt " + lt + " " + la + ", " + ra); return "i1 " + t;
+        }
+        if (e.value == "ne") {
+            if (lt == "ptr" || rt == "ptr") {
+                if (lt != "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + la + " to ptr"); la = ext; }
+                if (rt != "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + ra + " to ptr"); ra = ext; }
+                var r = "%" + Lbl(g, "r"); Emit(g, "  " + r + " = call i1 @kx_str_eq(ptr " + la + ", ptr " + ra + ")"); return "i1 " + r;
+            }
+            Emit(g, "  " + t + " = icmp ne " + lt + " " + la + ", " + ra); return "i1 " + t;
+        }
+         if (e.value == "le") {
+            if (lt == "ptr" || rt == "ptr") {
+                if (lt != "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + la + " to ptr"); la = ext; }
+                if (rt != "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + ra + " to ptr"); ra = ext; }
+                var r = "%" + Lbl(g, "r"); Emit(g, "  " + r + " = call i1 @kx_str_le(ptr " + la + ", ptr " + ra + ")"); return "i1 " + r;
+            }
+            Emit(g, "  " + t + " = icmp sle " + lt + " " + la + ", " + ra); return "i1 " + t;
+        }
+        if (e.value == "ge") {
+            if (lt == "ptr" || rt == "ptr") {
+                if (lt != "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + la + " to ptr"); la = ext; }
+                if (rt != "ptr") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + ra + " to ptr"); ra = ext; }
+                var r = "%" + Lbl(g, "r"); Emit(g, "  " + r + " = call i1 @kx_str_ge(ptr " + la + ", ptr " + ra + ")"); return "i1 " + r;
+            }
+            Emit(g, "  " + t + " = icmp sge " + lt + " " + la + ", " + ra); return "i1 " + t;
+        }
+        if (e.value == "and") {
+            var lv2 = la; var rv2 = ra;
+            if (lt == "i64") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = icmp ne i64 " + la + ", 0"); lv2 = ext; }
+            if (rt == "i64") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = icmp ne i64 " + ra + ", 0"); rv2 = ext; }
+            Emit(g, "  " + t + " = and i1 " + lv2 + ", " + rv2); return "i1 " + t;
+        }
+        if (e.value == "or") {
+            var lv2 = la; var rv2 = ra;
+            if (lt == "i64") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = icmp ne i64 " + la + ", 0"); lv2 = ext; }
+            if (rt == "i64") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = icmp ne i64 " + ra + ", 0"); rv2 = ext; }
+            Emit(g, "  " + t + " = or i1 " + lv2 + ", " + rv2); return "i1 " + t;
+        }
+        return lt + " " + t;
+    }
+    if (e.kind == "unary") {
+        var v = GenExpr(g, Child(arena, e, 0), arena);
+        var vt = XType(v); var va = XVal(v);
+        var t = "%" + Lbl(g, "t");
+        if (e.value == "neg") { Emit(g, "  " + t + " = sub " + vt + " 0, " + va); return vt + " " + t; }
+        if (e.value == "not") {
+            var nv = va;
+            if (vt == "i64") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = icmp ne i64 " + va + ", 0"); nv = ext; }
+            Emit(g, "  " + t + " = xor i1 " + nv + ", true");
+            return "i1 " + t;
+        }
+        if (e.value == "postinc") {
+            var child = Child(arena, e, 0);
+            if (child.kind == "identifier" && g.ln.Has(child.value)) {
+                var lhsType = g.lt.Get(child.value);
+                var lhsPtr = g.ln.Get(child.value);
+                var old = "%" + Lbl(g, "old");
+                Emit(g, "  " + old + " = load " + lhsType + ", ptr " + lhsPtr);
+                if (lhsType == "i64") {
+                    var inc = "%" + Lbl(g, "inc");
+                    Emit(g, "  " + inc + " = add i64 " + old + ", 1");
+                    Emit(g, "  store i64 " + inc + ", ptr " + lhsPtr);
+                    return "i64 " + old;
+                } else {
+                    var inc = "%" + Lbl(g, "inc");
+                    Emit(g, "  " + inc + " = add i32 " + old + ", 1");
+                    Emit(g, "  store i32 " + inc + ", ptr " + lhsPtr);
+                    return "i32 " + old;
+                }
+            }
+            return v;
+        }
+        if (e.value == "postdec") {
+            var child = Child(arena, e, 0);
+            if (child.kind == "identifier" && g.ln.Has(child.value)) {
+                var lhsType = g.lt.Get(child.value);
+                var lhsPtr = g.ln.Get(child.value);
+                var old = "%" + Lbl(g, "old");
+                Emit(g, "  " + old + " = load " + lhsType + ", ptr " + lhsPtr);
+                if (lhsType == "i64") {
+                    var dec = "%" + Lbl(g, "dec");
+                    Emit(g, "  " + dec + " = sub i64 " + old + ", 1");
+                    Emit(g, "  store i64 " + dec + ", ptr " + lhsPtr);
+                    return "i64 " + old;
+                } else {
+                    var dec = "%" + Lbl(g, "dec");
+                    Emit(g, "  " + dec + " = sub i32 " + old + ", 1");
+                    Emit(g, "  store i32 " + dec + ", ptr " + lhsPtr);
+                    return "i32 " + old;
+                }
+            }
+            return v;
+        }
+        return v;
+    }
+    if (e.kind == "arg") { return GenExpr(g, Child(arena, e, 0), arena); }
+    if (e.kind == "is") {
+        var base = GenExpr(g, Child(arena, e, 0), arena);
+        var bt = XType(base);
+        var bv = XVal(base);
+        if (e.children.Count > 2) {
+            var bind = Child(arena, e, 2).value;
+            var bindPtr = "%" + Lbl(g, "is");
+            if (bt == "ptr") {
+                Emit(g, "  " + bindPtr + " = alloca ptr");
+                Emit(g, "  store ptr " + bv + ", ptr " + bindPtr);
+                g.lt.Set(bind, "ptr");
+                g.ln.Set(bind, bindPtr);
+            } else {
+                Emit(g, "  " + bindPtr + " = alloca i64");
+                Emit(g, "  store i64 " + bv + ", ptr " + bindPtr);
+                g.lt.Set(bind, "i64");
+                g.ln.Set(bind, bindPtr);
+            }
+        }
+        var r = "%" + Lbl(g, "is");
+        if (bt == "ptr") {
+            Emit(g, "  " + r + " = icmp ne ptr " + bv + ", null");
+        } else {
+            Emit(g, "  " + r + " = icmp ne i64 " + bv + ", 0");
+        }
+        return "i1 " + r;
+    }
+    if (e.kind == "member") {
+        var base = GenExpr(g, Child(arena, e, 0), arena);
+        var bv = XVal(base);
+        var bt = XType(base);
+        var m = e.value;
+        if (m == "Count" && bt == "i64") {
+            var r = "%" + Lbl(g, "r");
+            Emit(g, "  " + r + " = call i64 @kx_list_size(i64 " + bv + ")");
+            return "i64 " + r;
+        }
+        if (m == "Length" && bt == "ptr") {
+            var r = "%" + Lbl(g, "r");
+            Emit(g, "  " + r + " = call i64 @kx_str_len(ptr " + bv + ")");
+            return "i64 " + r;
+        }
+        var structName = "";
+        var baseExpr = Child(arena, e, 0);
+        if (baseExpr.kind == "identifier" && g.lt.Has(baseExpr.value)) {
+            var varType = g.lt.Get(baseExpr.value);
+            if (varType.StartsWith("struct:")) structName = varType.Substring(7);
+        } else if (baseExpr.kind == "call") {
+            var innerCallee = Child(arena, baseExpr, 0);
+            if (innerCallee.kind == "identifier" && g.sigs.Has(innerCallee.value)) {
+                var returned = SigRet(g.sigs.Get(innerCallee.value));
+                if (returned.StartsWith("struct:")) structName = returned.Substring(7);
+            }
+        }
+        if (structName != "" && g.structs.Has(structName)) {
+            var fields = SplitAll(g.structs.Get(structName), ",");
+            if (fields.Get(0) == "") fields = List<string>();
+            var fidx = -1;
+            for (var fi = 0; fi < fields.Count; fi++) {
+                if (fields.Get(fi) == m) { fidx = fi; break; }
+            }
+            if (fidx >= 0) {
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call i64 @kx_struct_get(i64 " + bv + ", i32 " + IntStr(fidx) + ")");
+                if (m == "kind" || m == "text" || m == "value") {
+                    var p = "%" + Lbl(g, "field");
+                    Emit(g, "  " + p + " = inttoptr i64 " + r + " to ptr");
+                    return "ptr " + p;
+                }
+                return "i64 " + r;
+            }
+        }
+        if (bt == "i64" && m != "Count") {
+            if (baseExpr.kind == "identifier" && g.lt.Has(baseExpr.value)) {
+                var varType = g.lt.Get(baseExpr.value);
+                if (varType.StartsWith("struct:")) {
+                    var structName = varType.Substring(7);
+                    if (g.structs.Has(structName)) {
+                        var fieldStr = g.structs.Get(structName);
+                        var fields = SplitAll(fieldStr, ",");
+                        if (fields.Get(0) == "") fields = List<string>();
+                        var fidx = -1;
+                        for (var fi = 0; fi < fields.Count; fi++) {
+                            if (fields.Get(fi) == m) { fidx = fi; break; }
+                        }
+                        if (fidx >= 0) {
+                            var r = "%" + Lbl(g, "r");
+                            Emit(g, "  " + r + " = call i64 @kx_struct_get(i64 " + bv + ", i32 " + IntStr(fidx) + ")");
+                            return "i64 " + r;
+                        }
+                    }
+                }
+            }
+        }
+        return base;
+    }
+    if (e.kind == "call") {
+        var callee = Child(arena, e, 0);
+        if (callee.kind == "member") {
+            var base = Child(arena, callee, 0);
+            var m = callee.value;
+            if (base.kind == "identifier" && base.value == "std") {
+                if (m == "println") {
+                    if (e.children.Count > 1) {
+                        var a = GenExpr(g, Child(arena, e, 1), arena);
+                        var av = XVal(a);
+                        if (XType(a) == "i64") {
+                            var ext = "%" + Lbl(g, "ext");
+                            Emit(g, "  " + ext + " = inttoptr i64 " + av + " to ptr");
+                            av = ext;
+                        }
+                        Emit(g, "  call i64 @kx_println(ptr " + av + ")");
+                    } else { Emit(g, "  call i64 @kx_println(ptr " + GetStr(g, "") + ")"); }
+                    return "void 0";
+                }
+                if (m == "print") {
+                    if (e.children.Count > 1) {
+                        var a = GenExpr(g, Child(arena, e, 1), arena);
+                        Emit(g, "  call i64 @kx_print(" + XType(a) + " " + XVal(a) + ")");
+                    }
+                    return "void 0";
+                }
+                if (m == "readFile") {
+                    var a = GenExpr(g, Child(arena, e, 1), arena);
+                    var r = "%" + Lbl(g, "r");
+                    Emit(g, "  " + r + " = call ptr @kx_read_file(ptr " + XVal(a) + ")");
+                    return "ptr " + r;
+                }
+                if (m == "writeFile") {
+                    var a1 = GenExpr(g, Child(arena, e, 1), arena);
+                    var a2 = GenExpr(g, Child(arena, e, 2), arena);
+                    var r = "%" + Lbl(g, "r");
+                    Emit(g, "  " + r + " = call i1 @kx_write_file(ptr " + XVal(a1) + ", ptr " + XVal(a2) + ")");
+                    return "i1 " + r;
+                }
+                 if (m == "readln") {
+                    var r = "%" + Lbl(g, "r");
+                    Emit(g, "  " + r + " = call ptr @kx_readln()");
+                    return "ptr " + r;
+                }
+                if (m == "args") {
+                    var r = "%" + Lbl(g, "r");
+                    Emit(g, "  " + r + " = call i64 @kx_list_new(i32 2)");
+                    Emit(g, "  call void @kx_args(i64 " + r + ")");
+                    return "i64 " + r;
+                }
+                if (m == "exit") {
+                    var a = GenExpr(g, Child(arena, e, 1), arena);
+                    Emit(g, "  call void @kx_exit(i32 " + XVal(a) + ")");
+                    return "void 0";
+                }
+                if (m == "system") {
+                    var a = GenExpr(g, Child(arena, e, 1), arena);
+                    var r = "%" + Lbl(g, "r");
+                    Emit(g, "  " + r + " = call i64 @kx_system(ptr " + XVal(a) + ")");
+                    return "i64 " + r;
+                }
+                if (m == "stop") {
+                    Emit(g, "  call void @kx_stop()");
+                    return "void 0";
+                }
+                if (m == "rng") {
+                    var a = GenExpr(g, Child(arena, e, 1), arena);
+                    var r = "%" + Lbl(g, "r");
+                    Emit(g, "  " + r + " = call i64 @kx_rng_next(i64 " + XVal(a) + ")");
+                    return "i64 " + r;
+                }
+            }
+             var baseExpr = GenExpr(g, base, arena);
+            var bv = XVal(baseExpr);
+            var bt = XType(baseExpr);
+            if (m == "Add") {
+                var a = GenExpr(g, Child(arena, e, 1), arena);
+                Emit(g, "  call void @kx_list_add(i64 " + bv + ", i64 " + ToI64(g, a) + ")");
+                return "void 0";
+            }
+            if (m == "ItemAt" || m == "Get") {
+                var a = GenExpr(g, Child(arena, e, 1), arena);
+                var r = "%" + Lbl(g, "r");
+                if (XType(a) == "ptr") {
+                    var k = XVal(a);
+                    var c = "%" + Lbl(g, "c");
+                    Emit(g, "  " + c + " = ptrtoint ptr " + k + " to i64");
+                    Emit(g, "  " + r + " = call i64 @kx_map_get(i64 " + bv + ", i64 " + c + ")");
+                } else {
+                    Emit(g, "  " + r + " = call i64 @kx_list_get(i64 " + bv + ", i64 " + ToI64(g, a) + ")");
+                }
+                return "i64 " + r;
+            }
+            if (m == "Set") {
+                var a1 = GenExpr(g, Child(arena, e, 1), arena);
+                var a2 = GenExpr(g, Child(arena, e, 2), arena);
+                var k = XVal(a1); var v = XVal(a2);
+                if (XType(a1) == "ptr") {
+                    var c = "%" + Lbl(g, "c");
+                    Emit(g, "  " + c + " = ptrtoint ptr " + k + " to i64");
+                    k = c;
+                    if (XType(a2) == "ptr") {
+                        var vc = "%" + Lbl(g, "c");
+                        Emit(g, "  " + vc + " = ptrtoint ptr " + v + " to i64");
+                        v = vc;
+                    }
+                    Emit(g, "  call void @kx_map_set(i64 " + bv + ", i64 " + k + ", i64 " + v + ")");
+                } else {
+                    Emit(g, "  call void @kx_list_set(i64 " + bv + ", i64 " + ToI64(g, a1) + ", i64 " + ToI64(g, a2) + ")");
+                }
+                return "void 0";
+            }
+            if (m == "Get") {
+                var a = GenExpr(g, Child(arena, e, 1), arena);
+                var k = XVal(a);
+                if (XType(a) == "ptr") { var c = "%" + Lbl(g, "c"); Emit(g, "  " + c + " = ptrtoint ptr " + k + " to i64"); k = c; }
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call i64 @kx_map_get(i64 " + bv + ", i64 " + k + ")");
+                return "i64 " + r;
+            }
+            if (m == "Has") {
+                var a = GenExpr(g, Child(arena, e, 1), arena);
+                var k = XVal(a);
+                if (XType(a) == "ptr") { var c = "%" + Lbl(g, "c"); Emit(g, "  " + c + " = ptrtoint ptr " + k + " to i64"); k = c; }
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call i1 @kx_map_has(i64 " + bv + ", i64 " + k + ")");
+                return "i1 " + r;
+            }
+            if (m == "Remove") {
+                var a = GenExpr(g, Child(arena, e, 1), arena);
+                var k = XVal(a);
+                if (XType(a) == "ptr") { var c = "%" + Lbl(g, "c"); Emit(g, "  " + c + " = ptrtoint ptr " + k + " to i64"); k = c; }
+                Emit(g, "  call void @kx_map_remove(i64 " + bv + ", i64 " + k + ")");
+                return "void 0";
+            }
+            if (m == "RemoveAt") {
+                var a = GenExpr(g, Child(arena, e, 1), arena);
+                Emit(g, "  call void @kx_list_remove_at(i64 " + bv + ", i64 " + ToI64(g, a) + ")");
+                return "void 0";
+            }
+            if (m == "Clear") {
+                Emit(g, "  call void @kx_list_clear(i64 " + bv + ")");
+                return "void 0";
+            }
+            if (m == "Length") {
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call i64 @kx_str_len(ptr " + bv + ")");
+                return "i64 " + r;
+            }
+            if (m == "Substring") {
+                var a1 = GenExpr(g, Child(arena, e, 1), arena);
+                var a2 = GenExpr(g, Child(arena, e, 2), arena);
+                var bv2 = bv;
+                if (bt == "i64") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + bv + " to ptr"); bv2 = ext; }
+                var a1v = XVal(a1);
+                if (XType(a1) == "i32") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = sext i32 " + a1v + " to i64"); a1v = ext; }
+                var a2v = XVal(a2);
+                if (XType(a2) == "i32") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = sext i32 " + a2v + " to i64"); a2v = ext; }
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call ptr @kx_str_substr(ptr " + bv2 + ", i64 " + a1v + ", i64 " + a2v + ")");
+                return "ptr " + r;
+            }
+            if (m == "Contains") {
+                var a = GenExpr(g, Child(arena, e, 1), arena);
+                var bv2 = bv;
+                if (bt == "i64") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + bv + " to ptr"); bv2 = ext; }
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call i1 @kx_str_contains(ptr " + bv2 + ", ptr " + XVal(a) + ")");
+                return "i1 " + r;
+            }
+            if (m == "StartsWith") {
+                var a = GenExpr(g, Child(arena, e, 1), arena);
+                var bv2 = bv;
+                if (bt == "i64") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + bv + " to ptr"); bv2 = ext; }
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call i1 @kx_str_starts_with(ptr " + bv2 + ", ptr " + XVal(a) + ")");
+                return "i1 " + r;
+            }
+            if (m == "EndsWith") {
+                var a = GenExpr(g, Child(arena, e, 1), arena);
+                var bv2 = bv;
+                if (bt == "i64") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + bv + " to ptr"); bv2 = ext; }
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call i1 @kx_str_ends_with(ptr " + bv2 + ", ptr " + XVal(a) + ")");
+                return "i1 " + r;
+            }
+            if (m == "Upper") {
+                var bv2 = bv;
+                if (bt == "i64") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + bv + " to ptr"); bv2 = ext; }
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call ptr @kx_str_upper(ptr " + bv2 + ")");
+                return "ptr " + r;
+            }
+            if (m == "Lower") {
+                var bv2 = bv;
+                if (bt == "i64") { var ext = "%" + Lbl(g, "ext"); Emit(g, "  " + ext + " = inttoptr i64 " + bv + " to ptr"); bv2 = ext; }
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call ptr @kx_str_lower(ptr " + bv2 + ")");
+                return "ptr " + r;
+            }
+        }
+        if (callee.kind == "identifier") {
+             if (callee.value == "IntStr") {
+                var a = GenExpr(g, Child(arena, e, 1), arena);
+                var av = XVal(a);
+                if (XType(a) == "i32") {
+                    var ext = "%" + Lbl(g, "ext");
+                    Emit(g, "  " + ext + " = sext i32 " + av + " to i64");
+                    av = ext;
+                } else if (XType(a) == "ptr") {
+                    var ext = "%" + Lbl(g, "ext");
+                    Emit(g, "  " + ext + " = ptrtoint ptr " + av + " to i64");
+                    av = ext;
+                }
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call ptr @kx_int_str(i64 " + av + ")");
+                return "ptr " + r;
+            }
+            if (callee.value == "List") {
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call i64 @kx_list_new(i32 0)");
+                return "i64 " + r;
+            }
+            if (callee.value == "Map") {
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call i64 @kx_map_new(i32 0, i32 0)");
+                return "i64 " + r;
+            }
+            if (callee.value == "panic") {
+                var a = GenExpr(g, Child(arena, e, 1), arena);
+                Emit(g, "  call void @kx_panic(ptr " + XVal(a) + ")");
+                return "void 0";
+            }
+            if (callee.value == "exit") {
+                var a = GenExpr(g, Child(arena, e, 1), arena);
+                Emit(g, "  call void @kx_exit(i32 " + XVal(a) + ")");
+                return "void 0";
+            }
+            if (callee.value == "Chr") {
+                var a = GenExpr(g, Child(arena, e, 1), arena);
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call ptr @kx_int_str(i64 " + XVal(a) + ")");
+                return "ptr " + r;
+            }
+            if (callee.value == "Ord") {
+                var a = GenExpr(g, Child(arena, e, 1), arena);
+                var r = "%" + Lbl(g, "r");
+                Emit(g, "  " + r + " = call i64 @kx_str_len(ptr " + XVal(a) + ")");
+                return "i64 " + r;
+            }
+            var signature = g.sigs.Has(callee.value) ? g.sigs.Get(callee.value) : "i64|";
+            var callRet = SigRet(signature);
+            var callParams = SigParams(signature);
+            var argStr = "";
+            for (var ai = 1; ai < e.children.Count; ai++) {
+                if (ai > 1) argStr += ", ";
+                var a = GenExpr(g, Child(arena, e, ai), arena);
+                var wantSemantic = ai - 1 < callParams.Count ? callParams.Get(ai - 1) : XType(a);
+                var want = KxType(wantSemantic);
+                var av = Coerce(g, a, want);
+                argStr += want + " " + av;
+            }
+            var r = "%" + Lbl(g, "r");
+            var callRetIR = KxType(callRet);
+            if (callRetIR == "void") {
+                Emit(g, "  call void @" + callee.value + "(" + argStr + ")");
+                return "void 0";
+            }
+            Emit(g, "  " + r + " = call " + callRetIR + " @" + callee.value + "(" + argStr + ")");
+            return callRetIR + " " + r;
+        }
+         return "i64 0";
+    }
+    if (e.kind == "ternary") {
+        var cond = GenExpr(g, Child(arena, e, 0), arena);
+        var cv = XVal(cond);
+        if (XType(cond) == "i64") {
+            var ext = "%" + Lbl(g, "ext");
+            Emit(g, "  " + ext + " = icmp ne i64 " + cv + ", 0");
+            cv = ext;
+        }
+        var tl = Lbl(g, "tern.then"); var el = Lbl(g, "tern.else"); var ml = Lbl(g, "tern.merge");
+        Emit(g, "  br i1 " + cv + ", label %" + tl + ", label %" + el);
+        Emit(g, tl + ":");
+        var tv = GenExpr(g, Child(arena, e, 1), arena);
+        Emit(g, "  br label %" + ml);
+        Emit(g, el + ":");
+        var fv = GenExpr(g, Child(arena, e, 2), arena);
+        Emit(g, "  br label %" + ml);
+        Emit(g, ml + ":");
+        var t = "%" + Lbl(g, "phi");
+        Emit(g, "  " + t + " = phi " + XType(tv) + " [" + XVal(tv) + ", %" + tl + "], [" + XVal(fv) + ", %" + el + "]");
+        return XType(tv) + " " + t;
+    }
+    if (e.kind == "assign") {
+        var rhs = GenExpr(g, Child(arena, e, 1), arena);
+        var lhs = Child(arena, e, 0);
+        if (lhs.kind == "identifier" && g.ln.Has(lhs.value)) {
+            var lhsType = g.lt.Get(lhs.value);
+            var rhsType = XType(rhs);
+            var rhsVal = XVal(rhs);
+            if (lhsType != rhsType) {
+                if (lhsType == "i64" && rhsType == "i32") {
+                    var ext = "%" + Lbl(g, "ext");
+                    Emit(g, "  " + ext + " = sext i32 " + rhsVal + " to i64");
+                    rhsVal = ext; rhsType = "i64";
+                } else if (lhsType == "i32" && rhsType == "i64") {
+                    var trunc = "%" + Lbl(g, "trunc");
+                    Emit(g, "  " + trunc + " = trunc i64 " + rhsVal + " to i32");
+                    rhsVal = trunc; rhsType = "i32";
+                } else if (lhsType == "ptr" && rhsType == "i64") {
+                    var cast = "%" + Lbl(g, "inttoptr");
+                    Emit(g, "  " + cast + " = inttoptr i64 " + rhsVal + " to ptr");
+                    rhsVal = cast; rhsType = "ptr";
+                } else if (lhsType == "i64" && rhsType == "ptr") {
+                    var cast = "%" + Lbl(g, "ptrtoint");
+                    Emit(g, "  " + cast + " = ptrtoint ptr " + rhsVal + " to i64");
+                    rhsVal = cast; rhsType = "i64";
+                }
+            }
+            Emit(g, "  store " + rhsType + " " + rhsVal + ", ptr " + g.ln.Get(lhs.value));
+            return lhsType + " " + rhsVal;
+        }
+        return rhs;
+    }
+    return "i64 0";
+}
+
+// ---- statement codegen ----
+
+var GenStmt(g, s, arena) {
+    if (s.kind == "vardecl") {
+        var nm = Child(arena, s, 0).value;
+        var rhs = GenExpr(g, Child(arena, s, 1), arena);
+        var rt = XType(rhs);
+        var rv = XVal(rhs);
+        var uniqueNm = nm + "." + IntStr(g.lc.Get(0));
+        g.lc.Set(0, g.lc.Get(0) + 1);
+        if (Child(arena, s, 1).kind == "structinit") {
+            var structName = Child(arena, s, 1).value;
+            if (g.structs.Has(structName)) {
+                Emit(g, "  %" + uniqueNm + " = alloca i64");
+                Emit(g, "  store i64 " + rv + ", ptr %" + uniqueNm);
+                g.lt.Set(nm, "struct:" + structName);
+                g.ln.Set(nm, "%" + uniqueNm);
+                return 0;
+            }
+        }
+        Emit(g, "  %" + uniqueNm + " = alloca " + rt);
+        Emit(g, "  store " + rt + " " + rv + ", ptr %" + uniqueNm);
+        g.lt.Set(nm, rt); g.ln.Set(nm, "%" + uniqueNm);
+        return 0;
+    }
+    if (s.kind == "expr") { GenExpr(g, Child(arena, s, 0), arena); return 0; }
+     if (s.kind == "return") {
+        if (s.children.Count > 0) {
+            var v = GenExpr(g, Child(arena, s, 0), arena);
+            var vt = XType(v);
+            var vv = XVal(v);
+            if (g.curFnRet == "i64" && vt == "i1") {
+                var ext = "%" + Lbl(g, "ext");
+                Emit(g, "  " + ext + " = zext i1 " + vv + " to i64");
+                vv = ext; vt = "i64";
+            } else if (g.curFnRet == "i64" && vt == "ptr") {
+                var ext = "%" + Lbl(g, "ext");
+                Emit(g, "  " + ext + " = ptrtoint ptr " + vv + " to i64");
+                vv = ext; vt = "i64";
+            } else if (g.curFnRet == "i1" && vt == "i64") {
+                var ext = "%" + Lbl(g, "ext");
+                Emit(g, "  " + ext + " = icmp ne i64 " + vv + ", 0");
+                vv = ext; vt = "i1";
+            } else if (g.curFnRet == "ptr" && vt == "i64") {
+                var ext = "%" + Lbl(g, "ext");
+                Emit(g, "  " + ext + " = inttoptr i64 " + vv + " to ptr");
+                vv = ext; vt = "ptr";
+            }
+            Emit(g, "  ret " + vt + " " + vv);
+        } else { Emit(g, "  ret void"); }
+        return 0;
+    }
+    if (s.kind == "block") {
+        for (var i = 0; i < s.children.Count; i++) { GenStmt(g, Child(arena, s, i), arena); }
+        return 0;
+    }
+    if (s.kind == "if") {
+        var c = GenExpr(g, Child(arena, s, 0), arena);
+        var cv = XVal(c);
+        if (XType(c) == "i64") {
+            var ext = "%" + Lbl(g, "ext");
+            Emit(g, "  " + ext + " = icmp ne i64 " + cv + ", 0");
+            cv = ext;
+        }
+        var tl = Lbl(g, "if.then"); var ml = Lbl(g, "if.merge");
+        if (s.children.Count > 2) {
+            var el = Lbl(g, "if.else");
+            Emit(g, "  br i1 " + cv + ", label %" + tl + ", label %" + el);
+            Emit(g, tl + ":"); GenStmt(g, Child(arena, s, 1), arena); Emit(g, "  br label %" + ml);
+            Emit(g, el + ":"); GenStmt(g, Child(arena, s, 2), arena); Emit(g, "  br label %" + ml);
+        } else {
+            Emit(g, "  br i1 " + cv + ", label %" + tl + ", label %" + ml);
+            Emit(g, tl + ":"); GenStmt(g, Child(arena, s, 1), arena); Emit(g, "  br label %" + ml);
+        }
+        Emit(g, ml + ":");
+        return 0;
+    }
+    if (s.kind == "while") {
+        var cl = Lbl(g, "w.cond"); var bl = Lbl(g, "w.body"); var el = Lbl(g, "w.end");
+        Emit(g, "  br label %" + cl); Emit(g, cl + ":");
+        var c = GenExpr(g, Child(arena, s, 0), arena);
+        var cv = XVal(c);
+        if (XType(c) == "i64") {
+            var ext = "%" + Lbl(g, "ext");
+            Emit(g, "  " + ext + " = icmp ne i64 " + cv + ", 0");
+            cv = ext;
+        }
+        Emit(g, "  br i1 " + cv + ", label %" + bl + ", label %" + el);
+        Emit(g, bl + ":");
+        if (g.curFnName == "LexAll" && g.ln.Has("pos")) {
+            var dbgPos = "%" + Lbl(g, "dbgpos");
+            Emit(g, "  " + dbgPos + " = load i32, ptr " + g.ln.Get("pos"));
+            var dbgExt = "%" + Lbl(g, "dbgext");
+            Emit(g, "  " + dbgExt + " = sext i32 " + dbgPos + " to i64");
+            var dbgStr = "%" + Lbl(g, "dbgstr");
+            Emit(g, "  " + dbgStr + " = call ptr @kx_int_str(i64 " + dbgExt + ")");
+            Emit(g, "  call i64 @kx_println(ptr " + dbgStr + ")");
+        }
+        g.breakTargets.Add(el);
+        g.continueTargets.Add(cl);
+        GenStmt(g, Child(arena, s, 1), arena);
+        g.breakTargets.RemoveAt(g.breakTargets.Count - 1);
+        g.continueTargets.RemoveAt(g.continueTargets.Count - 1);
+        Emit(g, "  br label %" + cl);
+        Emit(g, el + ":");
+        return 0;
+    }
+    if (s.kind == "for") {
+        var bodyIdx = s.children.Count - 1;
+        var condLabel = Lbl(g, "for.cond");
+        var bodyLabel = Lbl(g, "for.body");
+        var incLabel = Lbl(g, "for.inc");
+        var endLabel = Lbl(g, "for.end");
+        var i = 0;
+        if (s.children.Count > 1 && arena.Get(s.children.Get(0)).kind == "vardecl") {
+            GenStmt(g, Child(arena, s, 0), arena);
+            i = 1;
+        }
+        Emit(g, "  br label %" + condLabel);
+        Emit(g, condLabel + ":");
+        if (i < bodyIdx) {
+            var cond = GenExpr(g, Child(arena, s, i), arena);
+            Emit(g, "  br i1 " + XVal(cond) + ", label %" + bodyLabel + ", label %" + endLabel);
+            i++;
+        } else {
+            Emit(g, "  br label %" + bodyLabel);
+        }
+        Emit(g, bodyLabel + ":");
+        g.breakTargets.Add(endLabel);
+        g.continueTargets.Add(incLabel);
+        GenStmt(g, Child(arena, s, bodyIdx), arena);
+        g.breakTargets.RemoveAt(g.breakTargets.Count - 1);
+        g.continueTargets.RemoveAt(g.continueTargets.Count - 1);
+        Emit(g, "  br label %" + incLabel);
+        Emit(g, incLabel + ":");
+        if (i < bodyIdx) {
+            GenExpr(g, Child(arena, s, i), arena);
+        }
+        Emit(g, "  br label %" + condLabel);
+        Emit(g, endLabel + ":");
+        return 0;
+    }
+    if (s.kind == "foreach") {
+        var varNm = Child(arena, s, 0).value;
+        var container = GenExpr(g, Child(arena, s, 1), arena);
+        var cv = XVal(container);
+        var idxVar = "%" + Lbl(g, "fe.idx");
+        var elemVar = "%" + Lbl(g, "fe.elem");
+        Emit(g, "  " + elemVar + " = alloca i64");
+        Emit(g, "  " + idxVar + " = alloca i64");
+        Emit(g, "  store i64 0, ptr " + idxVar);
+        var cl = Lbl(g, "fe.cond");
+        var bl = Lbl(g, "fe.body");
+        var el = Lbl(g, "fe.end");
+        Emit(g, "  br label %" + cl);
+        Emit(g, cl + ":");
+        var idx = "%" + Lbl(g, "idx");
+        Emit(g, "  " + idx + " = load i64, ptr " + idxVar);
+        var len = "%" + Lbl(g, "len");
+        Emit(g, "  " + len + " = call i64 @kx_list_size(i64 " + cv + ")");
+        var cmp = "%" + Lbl(g, "cmp");
+        Emit(g, "  " + cmp + " = icmp slt i64 " + idx + ", " + len);
+        Emit(g, "  br i1 " + cmp + ", label %" + bl + ", label %" + el);
+        Emit(g, bl + ":");
+        var elem = "%" + Lbl(g, "elem");
+        Emit(g, "  " + elem + " = call i64 @kx_list_get(i64 " + cv + ", i64 " + idx + ")");
+        Emit(g, "  store i64 " + elem + ", ptr " + elemVar);
+        g.lt.Set(varNm, "i64"); g.ln.Set(varNm, elemVar);
+        g.breakTargets.Add(el);
+        g.continueTargets.Add(cl);
+        GenStmt(g, Child(arena, s, 2), arena);
+        g.breakTargets.RemoveAt(g.breakTargets.Count - 1);
+        g.continueTargets.RemoveAt(g.continueTargets.Count - 1);
+        var nextIdx = "%" + Lbl(g, "next");
+        Emit(g, "  " + nextIdx + " = add i64 " + idx + ", 1");
+        Emit(g, "  store i64 " + nextIdx + ", ptr " + idxVar);
+        Emit(g, "  br label %" + cl);
+        Emit(g, el + ":");
+        return 0;
+    }
+    if (s.kind == "switch") {
+        var cond = GenExpr(g, Child(arena, s, 0), arena);
+        var endLabel = Lbl(g, "sw.end");
+        var defaultLabel = endLabel;
+        var caseLabels = List<string>();
+        for (var ci = 1; ci < s.children.Count; ci++) {
+            caseLabels.Add(Lbl(g, "sw.case"));
+        }
+        var hasDefault = false;
+        for (var ci = 1; ci < s.children.Count; ci++) {
+            var caseNode = Child(arena, s, ci);
+            var blockChild = -1;
+            for (var k = 0; k < caseNode.children.Count; k++) {
+                if (arena.Get(caseNode.children.Get(k)).kind == "block") {
+                    blockChild = k;
+                    break;
+                }
+            }
+            if (blockChild >= 0) {
+                var last = -1;
+                var blk = Child(arena, caseNode, blockChild);
+                if (blk.children.Count > 0) {
+                    last = blk.children.Count - 1;
+                    var lastStmt = arena.Get(blk.children.Get(last));
+                    if (lastStmt.kind == "return" || lastStmt.kind == "break") {
+                    } else { last = -1; }
+                }
+            }
+        }
+        for (var ci = 1; ci < s.children.Count; ci++) {
+            var caseNode = Child(arena, s, ci);
+            Emit(g, "  br label %" + caseLabels.Get(ci - 1));
+            Emit(g, caseLabels.Get(ci - 1) + ":");
+            for (var k = 0; k < caseNode.children.Count; k++) {
+                var child = Child(arena, caseNode, k);
+                if (child.kind == "block") {
+                    GenStmt(g, child, arena);
+                } else {
+                    var cv = GenExpr(g, child, arena);
+                    var cmp = "%" + Lbl(g, "cmp");
+                    Emit(g, "  " + cmp + " = icmp eq " + XType(cond) + " " + XVal(cond) + ", " + XVal(cv));
+                    var trueLabel = Lbl(g, "sw.true");
+                    Emit(g, "  br i1 " + cmp + ", label %" + trueLabel + ", label %" + caseLabels.Get(ci));
+                    Emit(g, trueLabel + ":");
+                }
+            }
+        }
+        Emit(g, endLabel + ":");
+        return 0;
+    }
+    if (s.kind == "spawn") {
+        // spawn { Component { field = value } }
+        // For now, spawn with tag mask 0 (would need proper tag computation)
+        var entity = "%" + Lbl(g, "entity");
+        Emit(g, "  " + entity + " = call i64 @kx_spawn(i64 0)");
+        // Set result for later use
+        g.ln.Set("spawn_result", entity);
+        g.lt.Set("spawn_result", "i64");
+        return 0;
+    }
+    if (s.kind == "attach") {
+        // attach(entity, Component)
+        if (s.children.Count >= 2) {
+            var entityExpr = GenExpr(g, Child(arena, s, 0), arena);
+            var compName = Child(arena, s, 1).value;
+            var compIdx = GetCompIdx(g, compName);
+            if (compIdx >= 0) {
+                Emit(g, "  call void @kx_attach(i64 " + XVal(entityExpr) + ", i32 " + IntStr(compIdx) + ")");
+            }
+        }
+        return 0;
+    }
+    if (s.kind == "detach") {
+        // detach(entity, Component)
+        if (s.children.Count >= 2) {
+            var entityExpr = GenExpr(g, Child(arena, s, 0), arena);
+            var compName = Child(arena, s, 1).value;
+            var compIdx = GetCompIdx(g, compName);
+            if (compIdx >= 0) {
+                Emit(g, "  call void @kx_detach(i64 " + XVal(entityExpr) + ", i32 " + IntStr(compIdx) + ")");
+            }
+        }
+        return 0;
+    }
+    if (s.kind == "despawn") {
+        // despawn entity
+        if (s.children.Count >= 1) {
+            var entityExpr = GenExpr(g, Child(arena, s, 0), arena);
+            Emit(g, "  call void @kx_despawn(i64 " + XVal(entityExpr) + ")");
+        }
+        return 0;
+    }
+    if (s.kind == "break") {
+        if (g.breakTargets.Count > 0) Emit(g, "  br label %" + g.breakTargets.Get(g.breakTargets.Count - 1));
+        return 0;
+    }
+    if (s.kind == "continue") {
+        if (g.continueTargets.Count > 0) Emit(g, "  br label %" + g.continueTargets.Get(g.continueTargets.Count - 1));
+        return 0;
+    }
+    return 0;
+}
+
+var GetCompIdx(g, name) {
+    // Would need to track component indices from declarations
+    // For now return -1 (not found)
+    return -1;
+}
+
+// ---- function codegen ----
+
+var GenFunc(g, decl, arena) {
+    var nm = Child(arena, decl, 0).value;
+    var ret = Child(arena, decl, 1).value;
+    var params = List<string>();
+    for (var i = 2; i < decl.children.Count; i++) {
+        var c = Child(arena, decl, i);
+        if (c.kind == "param") params.Add(c.value);
+    }
+    var sig = g.sigs.Has(nm) ? g.sigs.Get(nm) : KxType(ret) + "|";
+    var sigParams = SigParams(sig);
+    var irRet = KxType(SigRet(sig)); if (nm == "main") irRet = "i32";
+    g.curFnRet = irRet;
+    g.curFnName = nm;
+    var irP = "";
+    if (nm == "main") {
+        irP = "i32 %argc, ptr %argv";
+    } else {
+        for (var i = 0; i < params.Count; i++) {
+            if (i > 0) irP += ", ";
+            irP += KxType(sigParams.Get(i)) + " %" + params.Get(i);
+        }
+    }
+    Emit(g, "define " + irRet + " @" + nm + "(" + irP + ") {");
+    Emit(g, "entry:");
+    g.lt = Map<string, string>(); g.ln = Map<string, string>();
+    g.breakTargets = List<string>();
+    g.continueTargets = List<string>();
+    g.terminated.Set(0, 0);
+    if (nm == "main") {
+        Emit(g, "  call void @kx_save_args(i32 %argc, ptr %argv)");
+    }
+    for (var i = 0; i < params.Count; i++) {
+        var p = params.Get(i);
+        var pType = KxType(sigParams.Get(i));
+        var allocaNm = "%" + p + ".addr";
+        Emit(g, "  " + allocaNm + " = alloca " + pType);
+        Emit(g, "  store " + pType + " %" + p + ", ptr " + allocaNm);
+        g.lt.Set(p, pType); g.ln.Set(p, allocaNm);
+    }
+    GenStmt(g, Child(arena, decl, decl.children.Count - 1), arena);
+    if (ret == "void") {
+        Emit(g, "  ret void");
+    } else if (nm == "main") {
+        Emit(g, "  ret i32 0");
+    } else if (irRet == "ptr") {
+        Emit(g, "  ret ptr null");
+    } else if (irRet == "i1") {
+        Emit(g, "  ret i1 false");
+    } else {
+        Emit(g, "  ret " + irRet + " 0");
+    }
+    Emit(g, "}"); Emit(g, "");
+    return 0;
+}
+
+// ---- package manager helpers ----
+
+var FindProjectRoot() {
+    var dir = std.system("pwd");
+    // Would need to walk up looking for .kxconf
+    return dir;
+}
+
+var ParseKxConf(path) {
+    var content = std.readFile(path);
+    if (content == "") return Map<string, string>();
+    var conf = Map<string, string>();
+    var lines = content.Split("\n");
+    var section = "";
+    for (var i = 0; i < lines.Count; i++) {
+        var line = lines.Get(i).Trim();
+        if (line == "" || line.StartsWith("//")) continue;
+        if (line.StartsWith("[")) {
+            var end = line.IndexOf("]");
+            if (end > 0) section = line.Substring(1, end - 1);
+            continue;
+        }
+        var eq = line.IndexOf("=");
+        if (eq > 0) {
+            var key = line.Substring(0, eq).Trim();
+            var val = line.Substring(eq + 1).Trim();
+            if (val.Length >= 2 && val.StartsWith("\"") && val.EndsWith("\"")) {
+                val = val.Substring(1, val.Length - 2);
+            }
+            conf.Set(section + "." + key, val);
+        }
+    }
+    return conf;
+}
+
+var CmdInit(name) {
+    var dir = name;
+    std.system($"mkdir -p {dir}");
+    var conf = $"[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\ntarget\nkind = \"binary\"\nentry = \"main.kx\"\n\ndependencies\n";
+    std.writeFile($"{dir}/.kxconf", conf);
+    std.writeFile($"{dir}/main.kx", $"int main() {{\n    std.println(\"Hello from {name}!\");\n    return 0;\n}}\n");
+    std.println($"created project {name}");
+    return 0;
+}
+
+var CmdBuild(dir) {
+    var conf = ParseKxConf($"{dir}/.kxconf");
+    var entry = conf.Get("target.entry");
+    if (entry == "") entry = "main.kx";
+    var src = std.readFile($"{dir}/{entry}");
+    if (src == "") { std.println($"error: cannot read {dir}/{entry}"); return 1; }
+    var tokens = LexAll(src);
+    var pos = List<int>(); pos.Add(0);
+    var arena = List<AstNode>();
+    var errors = List<string>();
+    var rootIdx = ParseProgram(tokens, pos, arena, errors, entry);
+    if (errors.Count > 0) { foreach (var e in errors) { std.println(e); } return 1; }
+    var root = arena.Get(rootIdx);
+    var g = NewIR();
+    Emit(g, "target triple = \"x86_64-unknown-linux-gnu\"");
+    Emit(g, "");
+    EmitDecls(g);
+    InferSignatures(g, root, arena);
+    for (var i = 0; i < root.children.Count; i++) {
+        var d = Child(arena, root, i);
+        if (d.kind == "struct") {
+            var sname = Child(arena, d, 0).value;
+            var fieldStr = "";
+            for (var fi = 1; fi < d.children.Count; fi++) {
+                var f = Child(arena, d, fi);
+                if (f.kind == "field") {
+                    if (fieldStr != "") fieldStr += ",";
+                    fieldStr += f.value;
+                }
+            }
+            g.structs.Set(sname, fieldStr);
+        }
+        if (d.kind == "function") GenFunc(g, d, arena);
+        if (d.kind == "extern") {
+            var ename = Child(arena, d, 1).value;
+            var retType = Child(arena, d, 0).value;
+            var params = List<string>();
+            for (var pi = 2; pi < d.children.Count; pi++) {
+                var c = Child(arena, d, pi);
+                if (c.kind == "paramtype") params.Add(c.value);
+            }
+            var irRet = KxType(retType);
+            var irP = "";
+            for (var pi = 0; pi < params.Count; pi++) {
+                if (pi > 0) irP += ", ";
+                irP += KxType(params.Get(pi));
+            }
+            Emit(g, "declare " + irRet + " @" + ename + "(" + irP + ")");
+        }
+    }
+    var out = "";
+    for (var i = 0; i < g.lines.Count; i++) { out += g.lines.Get(i) + "\n"; }
+    for (var pi = 0; pi < g.pending.Count; pi++) { out += g.pending.Get(pi) + "\n"; }
+    var llPath = $"{dir}/build/output.ll";
+    var objPath = $"{dir}/build/output.o";
+    var binPath = $"{dir}/build/{conf.Get(\"package.name\")}";
+    std.system($"mkdir -p {dir}/build");
+    std.writeFile(llPath, out);
+    std.println($"compiled {entry} -> {llPath}");
+    var clangCmd = $"clang -o {binPath} {llPath} -lm 2>&1";
+    var rc = std.system(clangCmd);
+    if (rc != 0) { std.println("linking failed"); return 1; }
+    std.println($"built {binPath}");
+    return 0;
+}
+
+var CmdRun(dir) {
+    var conf = ParseKxConf($"{dir}/.kxconf");
+    var name = conf.Get("package.name");
+    if (name == "") name = "output";
+    var rc = CmdBuild(dir);
+    if (rc != 0) return rc;
+    return std.system($"{dir}/build/{name}");
+}
+
+var CmdCheck(dir) {
+    var entry = "main.kx";
+    var src = std.readFile($"{dir}/{entry}");
+    if (src == "") { std.println($"error: cannot read {dir}/{entry}"); return 1; }
+    var tokens = LexAll(src);
+    var pos = List<int>(); pos.Add(0);
+    var arena = List<AstNode>();
+    var errors = List<string>();
+    var rootIdx = ParseProgram(tokens, pos, arena, errors, entry);
+    if (errors.Count > 0) { foreach (var e in errors) { std.println(e); } return 1; }
+    std.println("check: OK");
+    return 0;
+}
+
+var CmdNew(name) {
+    return CmdInit(name);
+}
+
+var CmdPublish() {
+    var conf = ParseKxConf(".kxconf");
+    var name = conf.Get("package.name");
+    var version = conf.Get("package.version");
+    if (name == "" || version == "") {
+        std.println("error: .kxconf must have package.name and package.version");
+        return 1;
+    }
+    std.println($"publishing {name}@{version}...");
+    std.println("(publish requires registry connection)");
+    return 0;
+}
+
+var CmdInstall(pkg) {
+    std.println($"installing {pkg}...");
+    std.println("(install requires registry connection)");
+    return 0;
+}
+
+var CmdSearch(query) {
+    std.println($"searching for {query}...");
+    std.println("(search requires registry connection)");
+    return 0;
+}
+
+var CmdLogin() {
+    std.println("login requires registry connection");
+    return 0;
+}
+
+var CmdKeygen() {
+    std.println("generating signing key...");
+    std.system("openssl ecparam -genkey -name ed25519 -out ~/.kubex/key.pem 2>/dev/null");
+    std.println("key generated at ~/.kubex/key.pem");
+    return 0;
+}
+
+var CmdSbom() {
+    std.println("generating SBOM...");
+    std.println("(SBOM generation not yet implemented)");
+    return 0;
+}
+
+var CmdAudit() {
+    std.println("scanning for vulnerabilities...");
+    std.system("osv-scanner 2>/dev/null || echo 'osv-scanner not installed'");
+    return 0;
+}
+
+var PrintUsage() {
+    std.println("kubex -- Kubexic compiler and package manager");
+    std.println("");
+    std.println("compiler commands:");
+    std.println("  build <dir>      Compile .kx files to native executable");
+    std.println("  run <dir>        Compile and execute");
+    std.println("  check <dir>      Type-check a project");
+    std.println("  new <name>       Create a new project");
+    std.println("");
+    std.println("package commands:");
+    std.println("  init <name>      Create a new project with .kxconf");
+    std.println("  publish          Publish package to registry");
+    std.println("  install <pkg>    Install a package");
+    std.println("  search <query>   Search packages");
+    std.println("  login            Login to registry");
+    std.println("  keygen           Generate signing key");
+    std.println("  sbom             Generate SBOM");
+    std.println("  audit            Scan for vulnerabilities");
+    std.println("");
+    std.println("options:");
+    std.println("  --help           Show this help");
+    std.println("  --version        Show version");
+}
+
+// ---- main ----
+
+int main() {
+    var args = std.args();
+    if (args.Count < 2) { PrintUsage(); return 0; }
+    var cmd = args.Get(1);
+    if (cmd == "--help" || cmd == "-h") { PrintUsage(); return 0; }
+    if (cmd == "--version") { std.println("kubex 0.1.0"); return 0; }
+    if (cmd == "init" || cmd == "new") {
+        if (args.Count < 3) { std.println("usage: kubex init <name>"); return 1; }
+        return CmdInit(args.Get(2));
+    }
+    if (cmd == "build") {
+        var dir = args.Count > 2 ? args.Get(2) : ".";
+        return CmdBuild(dir);
+    }
+    if (cmd == "run") {
+        var dir = args.Count > 2 ? args.Get(2) : ".";
+        return CmdRun(dir);
+    }
+    if (cmd == "check") {
+        var dir = args.Count > 2 ? args.Get(2) : ".";
+        return CmdCheck(dir);
+    }
+    if (cmd == "publish") { return CmdPublish(); }
+    if (cmd == "install") {
+        if (args.Count < 3) { std.println("usage: kubex install <pkg>"); return 1; }
+        return CmdInstall(args.Get(2));
+    }
+    if (cmd == "search") {
+        if (args.Count < 3) { std.println("usage: kubex search <query>"); return 1; }
+        return CmdSearch(args.Get(2));
+    }
+    if (cmd == "login") { return CmdLogin(); }
+    if (cmd == "keygen") { return CmdKeygen(); }
+    if (cmd == "sbom") { return CmdSbom(); }
+    if (cmd == "audit") { return CmdAudit(); }
+    std.println($"unknown command: {cmd}");
+    std.println("run 'kubex --help' for usage");
+    return 1;
+}

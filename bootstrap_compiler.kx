@@ -1,0 +1,450 @@
+// bootstrap_compiler.kx -- Minimal Kubexic compiler that can compile itself
+// This is a stripped-down version that avoids features the C++ compiler doesn't support
+
+struct Token {
+    var kind = "";
+    var text = "";
+    var line = 0;
+    var col = 0;
+}
+
+struct AstNode {
+    var kind = "";
+    var value = "";
+    var line = 0;
+    var col = 0;
+    var children = List<int>();
+}
+
+extern int kx_argc();
+extern string kx_argv(int i);
+extern string kx_read_file(string path);
+extern int kx_println(string s);
+
+var IsDigit(c) {
+    return c >= "0" && c <= "9";
+}
+
+var IsLetter(c) {
+    return (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
+}
+
+var IsIdentPart(c) {
+    return IsLetter(c) || IsDigit(c) || c == "_";
+}
+
+var IsSpace(c) {
+    return c == " " || c == "\t" || c == "\n" || c == "\r";
+}
+
+var CharAt(s, i) {
+    if (i < 0 || i >= s.Length) {
+        return "";
+    }
+    return s.Substring(i, 1);
+}
+
+var LexAll(src) {
+    var tokens = List<Token>();
+    var pos = 0;
+    var line = 1;
+    var col = 1;
+    var n = src.Length;
+    while (pos < n) {
+        var c = CharAt(src, pos);
+        if (IsSpace(c)) {
+            pos = pos + 1;
+            col = col + 1;
+            if (c == "\n") {
+                line = line + 1;
+                col = 1;
+            }
+            continue;
+        }
+        if (c == "/" && CharAt(src, pos + 1) == "/") {
+            while (pos < n && CharAt(src, pos) != "\n") {
+                pos = pos + 1;
+                col = col + 1;
+            }
+            continue;
+        }
+        if (IsLetter(c) || c == "_") {
+            var start = pos;
+            var startCol = col;
+            var startLine = line;
+            while (pos < n && IsIdentPart(CharAt(src, pos))) {
+                pos = pos + 1;
+                col = col + 1;
+            }
+            var text = src.Substring(start, pos - start);
+            var kind = "id";
+            if (text == "component" || text == "system" || text == "tag" ||
+                text == "struct" || text == "enum" || text == "const" ||
+                text == "var" || text == "void" || text == "int" ||
+                text == "long" || text == "float" || text == "double" ||
+                text == "bool" || text == "byte" || text == "string" ||
+                text == "if" || text == "else" || text == "while" ||
+                text == "for" || text == "foreach" || text == "in" ||
+                text == "break" || text == "continue" || text == "return" ||
+                text == "spawn" || text == "despawn" || text == "attach" ||
+                text == "detach" || text == "self" || text == "with" ||
+                text == "without" || text == "new" || text == "tags" ||
+                text == "using" || text == "true" || text == "false" ||
+                text == "is" || text == "exact" || text == "panic" ||
+                text == "switch" || text == "case" || text == "default" ||
+                text == "extern") {
+                kind = "kw";
+            }
+            tokens.Add(Token { kind = kind, text = text, line = startLine, col = startCol });
+            continue;
+        }
+        if (IsDigit(c)) {
+            var start = pos;
+            var startCol = col;
+            var startLine = line;
+            var isFloat = false;
+            while (pos < n && IsDigit(CharAt(src, pos))) {
+                pos = pos + 1;
+                col = col + 1;
+            }
+            if (CharAt(src, pos) == "." && IsDigit(CharAt(src, pos + 1))) {
+                isFloat = true;
+                pos = pos + 1;
+                col = col + 1;
+                while (pos < n && IsDigit(CharAt(src, pos))) {
+                    pos = pos + 1;
+                    col = col + 1;
+                }
+            }
+            var text = src.Substring(start, pos - start);
+            if (isFloat) {
+                tokens.Add(Token { kind = "float", text = text, line = startLine, col = startCol });
+            } else {
+                tokens.Add(Token { kind = "int", text = text, line = startLine, col = startCol });
+            }
+            continue;
+        }
+        if (c == "\"") {
+            var startCol = col;
+            var startLine = line;
+            pos = pos + 1;
+            col = col + 1;
+            var text = "";
+            while (pos < n && CharAt(src, pos) != "\"") {
+                if (CharAt(src, pos) == "\\" && pos + 1 < n) {
+                    var esc = CharAt(src, pos + 1);
+                    if (esc == "n") {
+                        text = text + "\n";
+                    } else if (esc == "t") {
+                        text = text + "\t";
+                    } else if (esc == "r") {
+                        text = text + "\r";
+                    } else if (esc == "\\") {
+                        text = text + "\\";
+                    } else if (esc == "\"") {
+                        text = text + "\"";
+                    } else {
+                        text = text + "\\";
+                        text = text + esc;
+                    }
+                    pos = pos + 2;
+                    col = col + 2;
+                } else {
+                    text = text + CharAt(src, pos);
+                    pos = pos + 1;
+                    col = col + 1;
+                }
+            }
+            pos = pos + 1;
+            col = col + 1;
+            tokens.Add(Token { kind = "string", text = text, line = startLine, col = startCol });
+            continue;
+        }
+        var two = src.Substring(pos, 2);
+        if (two == "==" || two == "!=" || two == "<=" || two == ">=" ||
+            two == "&&" || two == "||" || two == "+=" || two == "-=" ||
+            two == "*=" || two == "/=" || two == "%=" || two == "++" ||
+            two == "--") {
+            tokens.Add(Token { kind = "op", text = two, line = line, col = col });
+            pos = pos + 2;
+            col = col + 2;
+            continue;
+        }
+        tokens.Add(Token { kind = "punct", text = c, line = line, col = col });
+        pos = pos + 1;
+        col = col + 1;
+    }
+    tokens.Add(Token { kind = "eof", text = "", line = line, col = col });
+    return tokens;
+}
+
+var NewNode(arena, kind, value, line, col) {
+    arena.Add(AstNode { kind = kind, value = value, line = line, col = col,
+                        children = List<int>() });
+    return arena.Count - 1;
+}
+
+var Node(arena, i) {
+    return arena.Get(i);
+}
+
+void AddChild(arena, parent, child) {
+    var children = arena.Get(parent).children;
+    children.Add(child);
+}
+
+var Peek(tokens, pos) {
+    return tokens.Get(pos.Get(0));
+}
+
+var CurKind(tokens, pos) {
+    return Peek(tokens, pos).kind;
+}
+
+var CurText(tokens, pos) {
+    return Peek(tokens, pos).text;
+}
+
+var AtEnd(tokens, pos) {
+    return CurKind(tokens, pos) == "eof";
+}
+
+void Advance(tokens, pos) {
+    pos.Set(0, pos.Get(0) + 1);
+}
+
+var IsKw(tokens, pos, w) {
+    var t = Peek(tokens, pos);
+    return t.kind == "kw" && t.text == w;
+}
+
+var IsPunct(tokens, pos, p) {
+    var t = Peek(tokens, pos);
+    return t.kind == "punct" && t.text == p;
+}
+
+var IsNameTok(tokens, pos) {
+    var t = Peek(tokens, pos);
+    return t.kind == "id" || t.kind == "kw";
+}
+
+var MatchKw(tokens, pos, w) {
+    if (IsKw(tokens, pos, w)) {
+        Advance(tokens, pos);
+        return true;
+    }
+    return false;
+}
+
+var MatchPunct(tokens, pos, p) {
+    if (IsPunct(tokens, pos, p)) {
+        Advance(tokens, pos);
+        return true;
+    }
+    return false;
+}
+
+var ExpectPunct(tokens, pos, p, errors, what) {
+    if (!MatchPunct(tokens, pos, p)) {
+        errors.Add("expected " + what);
+        return false;
+    }
+    return true;
+}
+
+var ParseExpression(tokens, pos, arena, errors) {
+    var t = Peek(tokens, pos);
+    if (t.kind == "int") {
+        Advance(tokens, pos);
+        return NewNode(arena, "int", t.text, t.line, t.col);
+    }
+    if (t.kind == "float") {
+        Advance(tokens, pos);
+        return NewNode(arena, "float", t.text, t.line, t.col);
+    }
+    if (t.kind == "string") {
+        Advance(tokens, pos);
+        return NewNode(arena, "string", t.text, t.line, t.col);
+    }
+    if (t.kind == "id") {
+        Advance(tokens, pos);
+        if (IsPunct(tokens, pos, "(")) {
+            Advance(tokens, pos);
+            var callNode = NewNode(arena, "call", t.text, t.line, t.col);
+            while (!IsPunct(tokens, pos, ")") && !AtEnd(tokens, pos)) {
+                AddChild(arena, callNode, ParseExpression(tokens, pos, arena, errors));
+                if (!MatchPunct(tokens, pos, ",")) {
+                    break;
+                }
+            }
+            ExpectPunct(tokens, pos, ")", errors, "')' after call arguments");
+            return callNode;
+        }
+        return NewNode(arena, "identifier", t.text, t.line, t.col);
+    }
+    if (IsPunct(tokens, pos, "(")) {
+        Advance(tokens, pos);
+        var inner = ParseExpression(tokens, pos, arena, errors);
+        ExpectPunct(tokens, pos, ")", errors, "')'");
+        return inner;
+    }
+    errors.Add("unexpected token");
+    Advance(tokens, pos);
+    return NewNode(arena, "error", "", t.line, t.col);
+}
+
+var ParseBlock(tokens, pos, arena, errors) {
+    ExpectPunct(tokens, pos, "{", errors, "'{' to start block");
+    var block = NewNode(arena, "block", "", 0, 0);
+    while (!IsPunct(tokens, pos, "}") && !AtEnd(tokens, pos)) {
+        var t = Peek(tokens, pos);
+        if (IsKw(tokens, pos, "return")) {
+            Advance(tokens, pos);
+            var retNode = NewNode(arena, "return", "", t.line, t.col);
+            if (!AtEnd(tokens, pos) && !IsKw(tokens, pos, "return")) {
+                AddChild(arena, retNode, ParseExpression(tokens, pos, arena, errors));
+            }
+            ExpectPunct(tokens, pos, ";", errors, "';' after return");
+            AddChild(arena, block, retNode);
+        } else if (IsKw(tokens, pos, "var")) {
+            Advance(tokens, pos);
+            var name = CurText(tokens, pos);
+            Advance(tokens, pos);
+            ExpectPunct(tokens, pos, "=", errors, "'=' in var declaration");
+            var val = ParseExpression(tokens, pos, arena, errors);
+            ExpectPunct(tokens, pos, ";", errors, "';' after var declaration");
+            var decl = NewNode(arena, "vardecl", name, t.line, t.col);
+            AddChild(arena, decl, val);
+            AddChild(arena, block, decl);
+        } else if (IsKw(tokens, pos, "if")) {
+            Advance(tokens, pos);
+            ExpectPunct(tokens, pos, "(", errors, "'(' after 'if'");
+            var cond = ParseExpression(tokens, pos, arena, errors);
+            ExpectPunct(tokens, pos, ")", errors, "')' after condition");
+            var thenBlock = ParseBlock(tokens, pos, arena, errors);
+            var ifNode = NewNode(arena, "if", "", t.line, t.col);
+            AddChild(arena, ifNode, cond);
+            AddChild(arena, ifNode, thenBlock);
+            AddChild(arena, block, ifNode);
+        } else {
+            var expr = ParseExpression(tokens, pos, arena, errors);
+            ExpectPunct(tokens, pos, ";", errors, "';' after expression");
+            AddChild(arena, block, expr);
+        }
+    }
+    ExpectPunct(tokens, pos, "}", errors, "'}' to close block");
+    return block;
+}
+
+var ParseFunction(tokens, pos, arena, errors) {
+    var t = Peek(tokens, pos);
+    var retType = t.text;
+    Advance(tokens, pos);
+    var name = CurText(tokens, pos);
+    Advance(tokens, pos);
+    ExpectPunct(tokens, pos, "(", errors, "'(' after function name");
+    var funcNode = NewNode(arena, "function", name, t.line, t.col);
+    AddChild(arena, funcNode, NewNode(arena, "rettype", retType, t.line, t.col));
+    while (!IsPunct(tokens, pos, ")") && !AtEnd(tokens, pos)) {
+        var paramName = CurText(tokens, pos);
+        Advance(tokens, pos);
+        AddChild(arena, funcNode, NewNode(arena, "param", paramName, t.line, t.col));
+        MatchPunct(tokens, pos, ",");
+    }
+    ExpectPunct(tokens, pos, ")", errors, "')' after parameters");
+    AddChild(arena, funcNode, ParseBlock(tokens, pos, arena, errors));
+    return funcNode;
+}
+
+var ParseProgram(tokens, arena, errors) {
+    var pos = List<int>();
+    pos.Add(0);
+    var program = NewNode(arena, "program", "", 1, 1);
+    while (!AtEnd(tokens, pos)) {
+        var t = Peek(tokens, pos);
+        if (IsKw(tokens, pos, "var") || IsKw(tokens, pos, "void") ||
+            IsKw(tokens, pos, "int") || IsKw(tokens, pos, "long") ||
+            IsKw(tokens, pos, "float") || IsKw(tokens, pos, "double") ||
+            IsKw(tokens, pos, "string") || IsKw(tokens, pos, "bool")) {
+            AddChild(arena, program, ParseFunction(tokens, pos, arena, errors));
+        } else {
+            errors.Add("expected declaration");
+            Advance(tokens, pos);
+        }
+    }
+    return program;
+}
+
+void DumpNode(arena, nodeIdx, out, level) {
+    var n = Node(arena, nodeIdx);
+    var pad = "";
+    for (var i = 0; i < level; i++) {
+        pad = pad + "  ";
+    }
+    if (n.kind == "program") {
+        out.Add(pad + "(program");
+        for (var i = 0; i < n.children.Count; i++) {
+            DumpNode(arena, n.children.Get(i), out, level + 1);
+        }
+        out.Add(pad + ")");
+    } else if (n.kind == "function") {
+        out.Add(pad + "(function " + n.value);
+        for (var i = 0; i < n.children.Count; i++) {
+            DumpNode(arena, n.children.Get(i), out, level + 1);
+        }
+        out.Add(pad + ")");
+    } else if (n.kind == "block") {
+        out.Add(pad + "(block");
+        for (var i = 0; i < n.children.Count; i++) {
+            DumpNode(arena, n.children.Get(i), out, level + 1);
+        }
+        out.Add(pad + ")");
+    } else if (n.kind == "return") {
+        out.Add(pad + "(return");
+        for (var i = 0; i < n.children.Count; i++) {
+            DumpNode(arena, n.children.Get(i), out, level + 1);
+        }
+        out.Add(pad + ")");
+    } else if (n.kind == "int" || n.kind == "float" || n.kind == "string") {
+        out.Add(pad + "(" + n.kind + " " + n.value + ")");
+    } else if (n.kind == "identifier") {
+        out.Add(pad + "(identifier " + n.value + ")");
+    } else if (n.kind == "call") {
+        out.Add(pad + "(call " + n.value);
+        for (var i = 0; i < n.children.Count; i++) {
+            DumpNode(arena, n.children.Get(i), out, level + 1);
+        }
+        out.Add(pad + ")");
+    } else {
+        out.Add(pad + "(" + n.kind + " " + n.value + ")");
+    }
+}
+
+int main() {
+    var argc = kx_argc();
+    if (argc < 2) {
+        kx_println("usage: bootstrap_compiler <input.kx>");
+        return 1;
+    }
+    var src = kx_read_file(kx_argv(1));
+    if (src == "") {
+        kx_println("error: could not read " + kx_argv(1));
+        return 1;
+    }
+    var tokens = LexAll(src);
+    var arena = List<AstNode>();
+    var errors = List<string>();
+    var program = ParseProgram(tokens, arena, errors);
+    if (errors.Count > 0) {
+        for (var i = 0; i < errors.Count; i++) {
+            kx_println(errors.Get(i));
+        }
+        return 1;
+    }
+    var lines = List<string>();
+    DumpNode(arena, program, lines, 0);
+    for (var i = 0; i < lines.Count; i++) {
+        kx_println(lines.Get(i));
+    }
+    return 0;
+}

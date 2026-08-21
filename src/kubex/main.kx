@@ -1,0 +1,71 @@
+// main.kx — unified Kubexic CLI entry point
+// Combines compiler (kxc) and package manager (kubex) into one tool.
+
+// TODO: Import compiler and package modules when multi-file compilation is ready
+// For now, this is a placeholder that will be filled in as modules are completed
+
+var PrintUsage() {
+    std.println("kubex — Kubexic compiler and package manager");
+    std.println("");
+    std.println("usage: kubex <command> [options] [args]");
+    std.println("");
+    std.println("compiler commands:");
+    std.println("  build <dir>      Compile .kx files to native executable");
+    std.println("  run <dir>        Compile and execute");
+    std.println("  check <file>     Type-check a single file");
+    std.println("  check-dir <dir>  Type-check all files in directory");
+    std.println("  mir <dir>        Run interaction analysis");
+    std.println("  fmt <file>       Format a file");
+    std.println("  fmt-dir <dir>    Format all files in directory");
+    std.println("  new <name>       Create a new project");
+    std.println("");
+    std.println("package commands:");
+    std.println("  init             Create a new project with .kxconf");
+    std.println("  add <dep>        Add a dependency");
+    std.println("  remove <dep>     Remove a dependency");
+    std.println("  install          Install dependencies from lock file");
+    std.println("  publish          Publish package to registry (signs with Ed25519)");
+    std.println("  search <query>   Search packages in registry");
+    std.println("  login            Login to registry");
+    std.println("  register         Register a new account");
+    std.println("  logout           Logout from registry");
+    std.println("  info <pkg>       Show package info from registry");
+    std.println("  verify <pkg>     Verify package signature");
+    std.println("  keygen           Generate signing keypair");
+    std.println("  sbom             Generate SBOM (Software Bill of Materials)");
+    std.println("  audit            Scan dependencies for known vulnerabilities");
+    std.println("");
+    std.println("cache commands:");
+    std.println("  cache list       List cached packages");
+    std.println("  cache clean      Remove all cached packages");
+    std.println("  cache path       Show cache directory");
+    std.println("");
+    std.println("options:");
+    std.println("  --target <triple>  Cross-compile for target");
+    std.println("  --registry <url>   Override registry URL");
+    std.println("  --debug            Include debug info");
+    std.println("  --verbose          Verbose output");
+    std.println("  --help             Show this help");
+    std.println("  --version          Show version");
+}
+
+int main() {
+    var args = std.args();
+    if (args.Count < 2) {
+        PrintUsage();
+        return 1;
+    }
+    var cmd = args.Get(1);
+    if (cmd == "--help" || cmd == "-h") {
+        PrintUsage();
+        return 0;
+    }
+    if (cmd == "--version") {
+        std.println("kubex 0.1.0");
+        return 0;
+    }
+    // TODO: Implement command dispatch
+    std.println($"unknown command: {cmd}");
+    std.println("run 'kubex --help' for usage");
+    return 1;
+}

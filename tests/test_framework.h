@@ -34,15 +34,15 @@ inline int runAll(const char* suite) {
     try {
       t.fn();
       std::printf("[PASS] %s\n", t.name.c_str());
-    } catch (const std::string& e) {
+    } catch (const std::string& ex) {
       failures++;
-      std::printf("[FAIL] %s: %s\n", t.name.c_str(), e.c_str());
-    } catch (const char* e) {
+      std::printf("[FAIL] %s: %s\n", t.name.c_str(), ex.c_str());
+    } catch (const char* ex) {
       failures++;
-      std::printf("[FAIL] %s: %s\n", t.name.c_str(), e);
-    } catch (const std::exception& e) {
+      std::printf("[FAIL] %s: %s\n", t.name.c_str(), ex);
+    } catch (const std::exception& ex) {
       failures++;
-      std::printf("[FAIL] %s: %s\n", t.name.c_str(), e.what());
+      std::printf("[FAIL] %s: %s\n", t.name.c_str(), ex.what());
     } catch (...) {
       failures++;
       std::printf("[FAIL] %s: unknown exception\n", t.name.c_str());

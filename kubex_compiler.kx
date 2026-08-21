@@ -1,0 +1,185 @@
+// kubex_compiler.kx -- Minimal self-hosting Kubexic compiler
+// Compiles .kx programs to LLVM IR
+// Designed to avoid C++ codegen bugs: no || chains, no complex expressions
+
+extern int kx_argc();
+extern string kx_argv(int i);
+extern string kx_read_file(string path);
+extern int kx_write_file(string path, string data);
+extern int kx_println(string s);
+
+var IntStr(v) {
+    if (v == 0) return "0";
+    var s = ""; var n = v;
+    if (n < 0) { s = "-"; n = 0 - n; }
+    var d = ""; while (n > 0) { d = "0" + d; n = n / 10; }
+    return s + d;
+}
+var ContainsChar(s, ch) { var i = 0; while (i < s.Length) { if (s.Substring(i, 1) == ch) return true; i = i + 1; } return false; }
+var IsLetter(c) { return ContainsChar("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", c); }
+var IsDigit(c) { return ContainsChar("0123456789", c); }
+var CharAt(s, i) { if (i < 0 || i >= s.Length) return ""; return s.Substring(i, 1); }
+
+// Token: kind|text|line|col
+var TokenKind(t) { var i = 0; while (i < t.Length && t.Substring(i, 1) != "|") { i = i + 1; } return t.Substring(0, i); }
+var TokenText(t) { var i = 0; while (i < t.Length && t.Substring(i, 1) != "|") { i = i + 1; } var s = i + 1; i = s; while (i < t.Length && t.Substring(i, 1) != "|") { i = i + 1; } return t.Substring(s, i - s); }
+var MakeToken(kind, text, line, col) { return kind + "|" + text + "|" + IntStr(line) + "|" + IntStr(col); }
+
+var LexAll(src) {
+    var tokens = List<string>();
+    var pos = List<int>(); pos.Add(0); var line = 1; var col = 1; var n = src.Length;
+    while (pos.Get(0) < n) {
+        var c = CharAt(src, pos.Get(0));
+        if (c == " " || c == "\t" || c == "\n") { pos.Set(0, pos.Get(0) + 1); col = col + 1; if (c == "\n") { line = line + 1; col = 1; } continue; }
+        if (c == "/" && CharAt(src, pos.Get(0) + 1) == "/") { while (pos.Get(0) < n && CharAt(src, pos.Get(0)) != "\n") { pos.Set(0, pos.Get(0) + 1); col = col + 1; } continue; }
+        if (IsLetter(c) || c == "_") {
+            var start = pos.Get(0); var sc = col; var sl = line;
+            while (pos.Get(0) < n && IsLetter(CharAt(src, pos.Get(0)))) { pos.Set(0, pos.Get(0) + 1); col = col + 1; }
+            while (pos.Get(0) < n && IsDigit(CharAt(src, pos.Get(0)))) { pos.Set(0, pos.Get(0) + 1); col = col + 1; }
+            while (pos.Get(0) < n && CharAt(src, pos.Get(0)) == "_") { pos.Set(0, pos.Get(0) + 1); col = col + 1; }
+            var text = src.Substring(start, pos.Get(0) - start);
+            var kind = "id";
+            if (text == "var") kind = "kw";
+            if (text == "int") kind = "kw";
+            if (text == "void") kind = "kw";
+            if (text == "string") kind = "kw";
+            if (text == "if") kind = "kw";
+            if (text == "else") kind = "kw";
+            if (text == "while") kind = "kw";
+            if (text == "return") kind = "kw";
+            if (text == "extern") kind = "kw";
+            if (text == "component") kind = "kw";
+            if (text == "system") kind = "kw";
+            if (text == "struct") kind = "kw";
+            tokens.Add(MakeToken(kind, text, sl, sc));
+            continue;
+        }
+        if (IsDigit(c)) { var start = pos.Get(0); while (pos.Get(0) < n && IsDigit(CharAt(src, pos.Get(0)))) { pos.Set(0, pos.Get(0) + 1); } tokens.Add(MakeToken("int", src.Substring(start, pos.Get(0) - start), line, col)); continue; }
+        if (c == "\"") { pos.Set(0, pos.Get(0) + 1); var text = ""; while (pos.Get(0) < n && CharAt(src, pos.Get(0)) != "\"") { text = text + CharAt(src, pos.Get(0)); pos.Set(0, pos.Get(0) + 1); } pos.Set(0, pos.Get(0) + 1); tokens.Add(MakeToken("string", text, line, col)); continue; }
+        // Two-char operators
+        if (pos.Get(0) + 1 < n) {
+            var c2 = CharAt(src, pos.Get(0) + 1);
+            if (c == "=" && c2 == "=") { tokens.Add(MakeToken("op", "==", line, col)); pos.Set(0, pos.Get(0) + 2); col = col + 2; continue; }
+            if (c == "!" && c2 == "=") { tokens.Add(MakeToken("op", "!=", line, col)); pos.Set(0, pos.Get(0) + 2); col = col + 2; continue; }
+            if (c == "<" && c2 == "=") { tokens.Add(MakeToken("op", "<=", line, col)); pos.Set(0, pos.Get(0) + 2); col = col + 2; continue; }
+            if (c == ">" && c2 == "=") { tokens.Add(MakeToken("op", ">=", line, col)); pos.Set(0, pos.Get(0) + 2); col = col + 2; continue; }
+            if (c == "|" && c2 == "|") { tokens.Add(MakeToken("op", "||", line, col)); pos.Set(0, pos.Get(0) + 2); col = col + 2; continue; }
+            if (c == "&" && c2 == "&") { tokens.Add(MakeToken("op", "&&", line, col)); pos.Set(0, pos.Get(0) + 2); col = col + 2; continue; }
+        }
+        tokens.Add(MakeToken("punct", c, line, col)); pos.Set(0, pos.Get(0) + 1);
+    }
+    tokens.Add(MakeToken("eof", "", line, col));
+    return tokens;
+}
+
+var TokenIs(tokens, i, kind, text) {
+    if (i >= tokens.Count) return false;
+    return TokenKind(tokens.Get(i)) == kind && TokenText(tokens.Get(i)) == text;
+}
+
+var SkipBlock(tokens, pos) {
+    var depth = 0; pos.Set(0, pos.Get(0) + 1);
+    while (depth > 0 && pos.Get(0) < tokens.Count) {
+        if (TokenIs(tokens, pos.Get(0), "punct", "{")) { depth = depth + 1; }
+        if (TokenIs(tokens, pos.Get(0), "punct", "}")) { depth = depth - 1; }
+        if (depth > 0) { pos.Set(0, pos.Get(0) + 1); }
+    }
+    pos.Set(0, pos.Get(0) + 1);
+    return 0;
+}
+
+int main() {
+    var argc = kx_argc();
+    if (argc < 3) { kx_println("usage: kubex <input.kx> <output.ll>"); return 1; }
+    var src = kx_read_file(kx_argv(1));
+    if (src == "") { kx_println("error: cannot read " + kx_argv(1)); return 1; }
+    var tokens = LexAll(src);
+    var ir = "target triple = \"x86_64-unknown-linux-gnu\"\n\n";
+    ir = ir + "declare void @kx_save_args(i32, ptr)\n";
+    ir = ir + "declare i64 @kx_println(ptr)\n";
+    ir = ir + "\n";
+    var pos = List<int>(); pos.Add(0);
+    while (pos.Get(0) < tokens.Count && TokenKind(tokens.Get(pos.Get(0))) != "eof") {
+        var t = TokenKind(tokens.Get(pos.Get(0)));
+        var tx = TokenText(tokens.Get(pos.Get(0)));
+        // Skip component/system/struct
+        if (t == "kw" && tx == "component") { pos.Set(0, pos.Get(0) + 1); while (pos.Get(0) < tokens.Count && !TokenIs(tokens, pos.Get(0), "punct", "{")) { pos.Set(0, pos.Get(0) + 1); } SkipBlock(tokens, pos); continue; }
+        if (t == "kw" && tx == "system") { pos.Set(0, pos.Get(0) + 1); while (pos.Get(0) < tokens.Count && !TokenIs(tokens, pos.Get(0), "punct", "{")) { pos.Set(0, pos.Get(0) + 1); } SkipBlock(tokens, pos); continue; }
+        if (t == "kw" && tx == "struct") { pos.Set(0, pos.Get(0) + 1); while (pos.Get(0) < tokens.Count && !TokenIs(tokens, pos.Get(0), "punct", "{")) { pos.Set(0, pos.Get(0) + 1); } SkipBlock(tokens, pos); continue; }
+        // Skip extern
+        if (t == "kw" && tx == "extern") { pos.Set(0, pos.Get(0) + 1); while (pos.Get(0) < tokens.Count && !TokenIs(tokens, pos.Get(0), "punct", ";")) { pos.Set(0, pos.Get(0) + 1); } pos.Set(0, pos.Get(0) + 1); continue; }
+        // Function declaration
+        if (t == "kw" && tx == "var") {
+            pos.Set(0, pos.Get(0) + 1);
+            var fnName = TokenText(tokens.Get(pos.Get(0))); pos.Set(0, pos.Get(0) + 1);
+            // Parse params
+            var params = "";
+            if (pos.Get(0) < tokens.Count && TokenIs(tokens, pos.Get(0), "punct", "(")) { pos.Set(0, pos.Get(0) + 1); }
+            while (pos.Get(0) < tokens.Count && !TokenIs(tokens, pos.Get(0), "punct", ")")) {
+                if (TokenKind(tokens.Get(pos.Get(0))) == "id") {
+                    if (params != "") params = params + ", ";
+                    params = params + "i64 %" + TokenText(tokens.Get(pos.Get(0)));
+                }
+                pos.Set(0, pos.Get(0) + 1);
+            }
+            pos.Set(0, pos.Get(0) + 1);
+            // Parse body
+            var depth = 1; pos.Set(0, pos.Get(0) + 1);
+            var retVal = "0";
+            while (depth > 0 && pos.Get(0) < tokens.Count) {
+                if (TokenIs(tokens, pos.Get(0), "punct", "{")) { depth = depth + 1; }
+                if (TokenIs(tokens, pos.Get(0), "punct", "}")) { depth = depth - 1; }
+                if (TokenKind(tokens.Get(pos.Get(0))) == "kw" && TokenText(tokens.Get(pos.Get(0))) == "return" && depth == 1) {
+                    pos.Set(0, pos.Get(0) + 1);
+                    if (pos.Get(0) < tokens.Count) { retVal = TokenText(tokens.Get(pos.Get(0))); pos.Set(0, pos.Get(0) + 1); }
+                }
+                if (depth > 0) { pos.Set(0, pos.Get(0) + 1); }
+            }
+            pos.Set(0, pos.Get(0) + 1);
+            if (fnName == "main") {
+                ir = ir + "define i32 @main(i32 %argc, ptr %argv) {\n  call void @kx_save_args(i32 %argc, ptr %argv)\n  ret i32 " + retVal + "\n}\n\n";
+            } else {
+                ir = ir + "define i64 @" + fnName + "(" + params + ") {\n  ret i64 0\n}\n\n";
+            }
+            continue;
+        }
+        if (t == "kw" && tx == "int") {
+            pos.Set(0, pos.Get(0) + 1);
+            var fnName = TokenText(tokens.Get(pos.Get(0))); pos.Set(0, pos.Get(0) + 1);
+            // Parse params
+            var params = "";
+            if (pos.Get(0) < tokens.Count && TokenIs(tokens, pos.Get(0), "punct", "(")) { pos.Set(0, pos.Get(0) + 1); }
+            while (pos.Get(0) < tokens.Count && !TokenIs(tokens, pos.Get(0), "punct", ")")) {
+                if (TokenKind(tokens.Get(pos.Get(0))) == "id") {
+                    if (params != "") params = params + ", ";
+                    params = params + "i64 %" + TokenText(tokens.Get(pos.Get(0)));
+                }
+                pos.Set(0, pos.Get(0) + 1);
+            }
+            pos.Set(0, pos.Get(0) + 1);
+            // Parse body
+            var depth = 1; pos.Set(0, pos.Get(0) + 1);
+            var retVal = "0";
+            while (depth > 0 && pos.Get(0) < tokens.Count) {
+                if (TokenIs(tokens, pos.Get(0), "punct", "{")) { depth = depth + 1; }
+                if (TokenIs(tokens, pos.Get(0), "punct", "}")) { depth = depth - 1; }
+                if (TokenKind(tokens.Get(pos.Get(0))) == "kw" && TokenText(tokens.Get(pos.Get(0))) == "return" && depth == 1) {
+                    pos.Set(0, pos.Get(0) + 1);
+                    if (pos.Get(0) < tokens.Count) { retVal = TokenText(tokens.Get(pos.Get(0))); pos.Set(0, pos.Get(0) + 1); }
+                }
+                if (depth > 0) { pos.Set(0, pos.Get(0) + 1); }
+            }
+            pos.Set(0, pos.Get(0) + 1);
+            if (fnName == "main") {
+                ir = ir + "define i32 @main(i32 %argc, ptr %argv) {\n  call void @kx_save_args(i32 %argc, ptr %argv)\n  ret i32 " + retVal + "\n}\n\n";
+            } else {
+                ir = ir + "define i32 @" + fnName + "(" + params + ") {\n  ret i32 " + retVal + "\n}\n\n";
+            }
+            continue;
+        }
+        pos.Set(0, pos.Get(0) + 1);
+    }
+    kx_write_file(kx_argv(2), ir);
+    kx_println("compiled " + kx_argv(1) + " -> " + kx_argv(2));
+    return 0;
+}

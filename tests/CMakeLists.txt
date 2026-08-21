@@ -18,4 +18,9 @@ target_link_libraries(mir_tests PRIVATE kubexic_core)
 target_include_directories(mir_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME mir_tests COMMAND mir_tests)
 
+add_executable(codegen_tests codegen_tests.cpp)
+target_link_libraries(codegen_tests PRIVATE kubexic_codegen kubexic_core LLVM)
+target_include_directories(codegen_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME codegen_tests COMMAND codegen_tests)
+
 add_test(NAME e2e_hello COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_e2e.sh)

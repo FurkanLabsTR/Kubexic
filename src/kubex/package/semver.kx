@@ -1,0 +1,105 @@
+// semver.kx — Semantic versioning for Kubexic, written in Kubexic.
+
+struct SemVer {
+    var major = 0;
+    var minor = 0;
+    var patch = 0;
+    var preRelease = "";
+    var build = "";
+}
+
+struct VersionReq {
+    var version = SemVer {};
+    var kind = "";  // "exact", "caret", "tilde", "gte", "any"
+}
+
+var ParseSemVer(str) {
+    var v = SemVer {};
+    // Strip pre-release and build
+    var plusIdx = str.IndexOf("+");
+    if (plusIdx >= 0) {
+        v.build = str.Substring(plusIdx + 1);
+        str = str.Substring(0, plusIdx);
+    }
+    var dashIdx = str.IndexOf("-");
+    if (dashIdx >= 0) {
+        v.preRelease = str.Substring(dashIdx + 1);
+        str = str.Substring(0, dashIdx);
+    }
+    var parts = str.Split(".");
+    if (parts.Count >= 1) v.major = std.parseInt(parts.Get(0));
+    if (parts.Count >= 2) v.minor = std.parseInt(parts.Get(1));
+    if (parts.Count >= 3) v.patch = std.parseInt(parts.Get(2));
+    return v;
+}
+
+var SemVerStr(v) {
+    var s = $"{v.major}.{v.minor}.{v.patch}";
+    if (v.preRelease != "") {
+        s += $"-{v.preRelease}";
+    }
+    return s;
+}
+
+var ParseVersionReq(str) {
+    var req = VersionReq {};
+    if (str == "" || str == "*") {
+        req.kind = "any";
+        return req;
+    }
+    if (str.StartsWith("^")) {
+        req.kind = "caret";
+        req.version = ParseSemVer(str.Substring(1));
+    } else if (str.StartsWith("~")) {
+        req.kind = "tilde";
+        req.version = ParseSemVer(str.Substring(1));
+    } else if (str.StartsWith(">=")) {
+        req.kind = "gte";
+        req.version = ParseSemVer(str.Substring(2));
+    } else if (str.StartsWith("=") || str.StartsWith("==")) {
+        req.kind = "exact";
+        var verStr = str.StartsWith("==") ? str.Substring(2) : str.Substring(1);
+        req.version = ParseSemVer(verStr);
+    } else {
+        req.kind = "exact";
+        req.version = ParseSemVer(str);
+    }
+    return req;
+}
+
+var VersionMatches(version, req) {
+    if (req.kind == "any") {
+        return true;
+    }
+    if (req.kind == "exact") {
+        return version.major == req.version.major &&
+               version.minor == req.version.minor &&
+               version.patch == req.version.patch;
+    }
+    if (req.kind == "caret") {
+        if (version.major != req.version.major) return false;
+        if (version.minor < req.version.minor) return false;
+        if (version.minor == req.version.minor && version.patch < req.version.patch) return false;
+        return true;
+    }
+    if (req.kind == "tilde") {
+        if (version.major != req.version.major) return false;
+        if (version.minor != req.version.minor) return false;
+        if (version.patch < req.version.patch) return false;
+        return true;
+    }
+    if (req.kind == "gte") {
+        if (version.major > req.version.major) return true;
+        if (version.major == req.version.major && version.minor > req.version.minor) return true;
+        if (version.major == req.version.major && version.minor == req.version.minor &&
+            version.patch >= req.version.patch) return true;
+        return false;
+    }
+    return false;
+}
+
+var VersionCompare(a, b) {
+    if (a.major != b.major) return a.major - b.major;
+    if (a.minor != b.minor) return a.minor - b.minor;
+    return a.patch - b.patch;
+}

@@ -72,6 +72,9 @@ g++ "${KUBEX_FLAGS[@]}" \
   tools/kubex/deps.cpp tools/kubex/build.cpp tools/kubex/init.cpp \
   tools/kubex/semver.cpp tools/kubex/auth_manager.cpp \
   tools/kubex/registry_client.cpp tools/kubex/archive_build.cpp \
+  tools/kubex/signing.cpp tools/kubex/lockfile.cpp tools/kubex/sbom.cpp \
+  tools/kubex/audit.cpp \
+  -lssl -lcrypto \
   -o build/kubex
 
 echo
