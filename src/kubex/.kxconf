@@ -1,0 +1,12 @@
+[package]
+name = "kubex"
+version = "0.1.0"
+description = "Kubexic compiler and package manager (self-hosted)"
+
+[target]
+kind = "binary"
+entry = "kubex.kx"
+output = "kubex"
+
+[build]
+optimization = "release"

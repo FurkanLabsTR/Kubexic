@@ -2,42 +2,42 @@
 // Generates native code using LLVM C API via extern declarations.
 
 // LLVM C API bindings
-extern void* LLVMModuleCreateWithName(const char* name);
-extern void LLVMDisposeModule(void* m);
-extern void LLVMSetTarget(void* m, const char* triple);
-extern void* LLVMInt32Type();
-extern void* LLVMInt64Type();
-extern void* LLVMDoubleType();
-extern void* LLVMVoidType();
-extern void* LLVMFunctionType(void* retTy, void* paramTypes, int paramCount, int isVarArg);
-extern void* LLVMAddFunction(void* m, const char* name, void* fnTy);
-extern void* LLVMAppendBasicBlock(void* fn, const char* name);
-extern void* LLVMCreateBuilder();
-extern void LLVMPositionBuilderAtEnd(void* builder, void* block);
-extern void* LLVMBuildAlloca(void* builder, void* ty, const char* name);
-extern void* LLVMBuildStore(void* builder, void* val, void* ptr);
-extern void* LLVMBuildLoad(void* builder, void* ty, void* ptr, const char* name);
-extern void* LLVMBuildAdd(void* builder, void* lhs, void* rhs, const char* name);
-extern void* LLVMBuildSub(void* builder, void* lhs, void* rhs, const char* name);
-extern void* LLVMBuildMul(void* builder, void* lhs, void* rhs, const char* name);
-extern void* LLVMBuildSDiv(void* builder, void* lhs, void* rhs, const char* name);
-extern void* LLVMBuildRet(void* builder, void* val);
-extern void* LLVMBuildRetVoid(void* builder);
-extern void* LLVMBuildBr(void* builder, void* dest);
-extern void* LLVMBuildCondBr(void* builder, void* cond, void* then, void* otherwise);
-extern void* LLVMBuildICmp(void* builder, int pred, void* lhs, void* rhs, const char* name);
-extern void* LLVMBuildCall(void* builder, void* fn, void* args, int argCount, const char* name);
-extern void* LLVMBuildGlobalStringPtr(void* builder, const char* str, const char* name);
-extern void* LLVMConstInt(void* ty, long long val, int signExtend);
-extern void* LLVMConstReal(void* ty, double val);
-extern int LLVMVerifyModule(void* m, int action, char** errorMessage);
-extern int kx_llvm_emit_object(void* m, const char* triple, const char* outpath);
+extern handle LLVMModuleCreateWithName(string name);
+extern void LLVMDisposeModule(handle m);
+extern void LLVMSetTarget(handle m, string triple);
+extern handle LLVMInt32Type();
+extern handle LLVMInt64Type();
+extern handle LLVMDoubleType();
+extern handle LLVMVoidType();
+extern handle LLVMFunctionType(handle retTy, handle paramTypes, int paramCount, int isVarArg);
+extern handle LLVMAddFunction(handle m, string name, handle fnTy);
+extern handle LLVMAppendBasicBlock(handle fn, string name);
+extern handle LLVMCreateBuilder();
+extern void LLVMPositionBuilderAtEnd(handle builder, handle block);
+extern handle LLVMBuildAlloca(handle builder, handle ty, string name);
+extern handle LLVMBuildStore(handle builder, handle val, handle ptr);
+extern handle LLVMBuildLoad(handle builder, handle ty, handle ptr, string name);
+extern handle LLVMBuildAdd(handle builder, handle lhs, handle rhs, string name);
+extern handle LLVMBuildSub(handle builder, handle lhs, handle rhs, string name);
+extern handle LLVMBuildMul(handle builder, handle lhs, handle rhs, string name);
+extern handle LLVMBuildSDiv(handle builder, handle lhs, handle rhs, string name);
+extern handle LLVMBuildRet(handle builder, handle val);
+extern handle LLVMBuildRetVoid(handle builder);
+extern handle LLVMBuildBr(handle builder, handle dest);
+extern handle LLVMBuildCondBr(handle builder, handle cond, handle then, handle otherwise);
+extern handle LLVMBuildICmp(handle builder, int pred, handle lhs, handle rhs, string name);
+extern handle LLVMBuildCall(handle builder, handle fn, handle args, int argCount, string name);
+extern handle LLVMBuildGlobalStringPtr(handle builder, string str, string name);
+extern handle LLVMConstInt(handle ty, long val, int signExtend);
+extern handle LLVMConstReal(handle ty, double val);
+extern int LLVMVerifyModule(handle m, int action, handle errorMessage);
+extern int kx_llvm_emit_object(handle m, string triple, string outpath);
 
 struct CodegenContext {
     var module = "";
     var builder = "";
-    var functions = Map<string, void*>();
-    var variables = Map<string, void*>();
+    var functions = Map<string, handle >();
+    var variables = Map<string, handle >();
     var currentFunc = "";
     var errors = List<string>();
 }
@@ -170,7 +170,7 @@ void GenFunction(ctx, arena, declIdx) {
             paramCount++;
         }
     }
-    var paramTypes = List<void*>();
+    var paramTypes = List< handle >();
     for (var i = 0; i < paramCount; i++) {
         paramTypes.Add(LLVMInt64Type());
     }

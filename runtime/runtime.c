@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <ctype.h>
+#include <dirent.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -121,6 +122,21 @@ void kx_list_clear(long long h) {
 long long kx_list_size(long long h) {
   kx_vec* v = vecOf(h);
   return v ? v->size : 0;
+}
+
+int kx_list_contains(long long h, long long val) {
+  kx_vec* v = vecOf(h);
+  if (!v) return 0;
+  for (long long i = 0; i < v->size; i++) {
+    if (v->data[i] == val) return 1;
+    /* Also check strings by content */
+    if (v->elemKind == KX_KIND_STR) {
+      const char* a = (const char*)(uintptr_t)v->data[i];
+      const char* b = (const char*)(uintptr_t)val;
+      if (a && b && strcmp(a, b) == 0) return 1;
+    }
+  }
+  return 0;
 }
 
 long long kx_list_begin(long long h) {
@@ -2014,7 +2030,7 @@ char* kx_argv(int i) {
 
 long long kx_args(long long existing_list) {
   long long list = existing_list ? existing_list : kx_list_new(1);
-  for (int i = 0; i < g_argc; i++) {
+  for (int i = 1; i < g_argc; i++) { /* skip argv[0] (program name) */
     kx_list_add(list, (long long)(uintptr_t)g_argv[i]);
   }
   return list;
@@ -2040,6 +2056,34 @@ int kx_write_file(const char* path, const char* data) {
   fwrite(data, 1, strlen(data), f);
   fclose(f);
   return 1;
+}
+
+long long kx_list_dir(const char* path) {
+  DIR* dir = opendir(path ? path : ".");
+  if (!dir) return kx_list_new(2); // KX_KIND_STR = 2
+  long long list = kx_list_new(2);
+  struct dirent* entry;
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+    kx_list_add(list, (long long)kx_dup(entry->d_name));
+  }
+  closedir(dir);
+  return list;
+}
+
+int kx_parse_int(const char* s) {
+  if (!s || !*s) return 0;
+  return (int)strtol(s, NULL, 10);
+}
+
+double kx_parse_double(const char* s) {
+  if (!s || !*s) return 0.0;
+  return strtod(s, NULL);
+}
+
+int kx_system_cmd(const char* cmd) {
+  if (!cmd || !*cmd) return -1;
+  return system(cmd);
 }
 
 int kx_print_bytes(const char* s) {

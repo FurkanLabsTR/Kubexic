@@ -340,8 +340,6 @@ var PrevText(tokens, pos) {
 
 /* ---------------- expression parsing ---------------- */
 
-var ParseExpression(tokens, pos, arena, errors);
-
 var ParsePrimary(tokens, pos, arena, errors) {
     var t = Peek(tokens, pos);
     if (t.kind == "int") {
@@ -419,10 +417,10 @@ var ParsePrimary(tokens, pos, arena, errors) {
 
 var ParseBinary(tokens, pos, arena, errors, minPrec) {
     var left = ParsePrimary(tokens, pos, arena, errors);
-    while (true) {
+    while (!AtEnd(tokens, pos)) {
         var t = Peek(tokens, pos);
-        var prec = 0;
-        if (t.kind == "op") {
+        var prec = -1;
+        if (t.kind == "op" || t.kind == "punct") {
             if (t.text == "==" || t.text == "!=" || t.text == "<" ||
                 t.text == ">" || t.text == "<=" || t.text == ">=") {
                 prec = 2;
@@ -450,9 +448,41 @@ var ParseBinary(tokens, pos, arena, errors, minPrec) {
     return left;
 }
 
-ParseExpression = (tokens, pos, arena, errors) -> {
-    return ParseBinary(tokens, pos, arena, errors, 0);
-};
+var ParseAssignOp(tokens, pos) {
+    if (MatchPunct(tokens, pos, "=")) {
+        return "assign";
+    }
+    if (MatchOp(tokens, pos, "+=")) {
+        return "addassign";
+    }
+    if (MatchOp(tokens, pos, "-=")) {
+        return "subassign";
+    }
+    if (MatchOp(tokens, pos, "*=")) {
+        return "mulassign";
+    }
+    if (MatchOp(tokens, pos, "/=")) {
+        return "divassign";
+    }
+    if (MatchOp(tokens, pos, "%=")) {
+        return "modassign";
+    }
+    return "";
+}
+
+var ParseExpression(tokens, pos, arena, errors) {
+    var lhs = ParseBinary(tokens, pos, arena, errors, 0);
+    var opLine = CurLine(tokens, pos);
+    var opCol = CurCol(tokens, pos);
+    var op = ParseAssignOp(tokens, pos);
+    if (op == "") {
+        return lhs;
+    }
+    var node = NewNode(arena, "assign", op, opLine, opCol);
+    AddChild(arena, node, lhs);
+    AddChild(arena, node, ParseExpression(tokens, pos, arena, errors));
+    return node;
+}
 
 /* ---------------- statement parsing ---------------- */
 

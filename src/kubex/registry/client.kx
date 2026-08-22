@@ -1,16 +1,11 @@
-// client.kx — HTTP registry client for Kubexic, written in Cubexic.
-// Communicates with the package registry via curl.
-
-// Curl wrapper functions
-extern int system(const char* cmd);
+// client.kx — HTTP registry client for Kubexic, written in Kubexic.
+// Communicates with the package registry via curl shell-outs.
 
 var CurlGet(url) {
     var tmpFile = "/tmp/kubex_http_resp";
-    var cmd = $"curl -s -o {tmpFile} -w '%{{http_code}}' '{url}'";
-    system(cmd);
-    var resp = std.readFile(tmpFile);
-    std.system($"rm -f {tmpFile}");
-    return resp;
+    var cmd = $"curl -s -o {tmpFile} '{url}'";
+    std.system(cmd);
+    return std.readFile(tmpFile);
 }
 
 var CurlPost(url, data, token) {
@@ -19,11 +14,9 @@ var CurlPost(url, data, token) {
     if (token != "") {
         authHeader = $" -H 'Authorization: Bearer {token}'";
     }
-    var cmd = $"curl -s -X POST -H 'Content-Type: application/json'{authHeader} -d '{data}' -o {tmpFile} -w '%{{http_code}}' '{url}'";
-    system(cmd);
-    var resp = std.readFile(tmpFile);
-    std.system($"rm -f {tmpFile}");
-    return resp;
+    var cmd = $"curl -s -X POST -H 'Content-Type: application/json'{authHeader} -d '{data}' -o {tmpFile} '{url}'";
+    std.system(cmd);
+    return std.readFile(tmpFile);
 }
 
 var CurlPut(url, data, token) {
@@ -32,18 +25,13 @@ var CurlPut(url, data, token) {
     if (token != "") {
         authHeader = $" -H 'Authorization: Bearer {token}'";
     }
-    var cmd = $"curl -s -X PUT -H 'Content-Type: application/json'{authHeader} -d '{data}' -o {tmpFile} -w '%{{http_code}}' '{url}'";
-    system(cmd);
-    var resp = std.readFile(tmpFile);
-    std.system($"rm -f {tmpFile}");
-    return resp;
+    var cmd = $"curl -s -X PUT -H 'Content-Type: application/json'{authHeader} -d '{data}' -o {tmpFile} '{url}'";
+    std.system(cmd);
+    return std.readFile(tmpFile);
 }
 
-/* ---------------- registry operations ---------------- */
-
 var GetRegistryUrl() {
-    // Would check KUBEX_REGISTRY_URL env var
-    return "https://registry.kubex.dev/v1";
+    return "https://registry.kubexic.furkanlabs.tr/v1";
 }
 
 var RegistrySearch(query) {
@@ -63,15 +51,14 @@ var RegistryGetVersion(name, version) {
 
 var RegistryDownload(name, version, destPath) {
     var url = $"{GetRegistryUrl()}/packages/{name}/{version}/download";
-    var cmd = $"curl -s -o '{destPath}' -w '%{{http_code}}' '{url}'";
-    system(cmd);
+    var cmd = $"curl -s -o '{destPath}' '{url}'";
+    std.system(cmd);
     return true;
 }
 
 var RegistryPublishSigned(name, version, archivePath, signature, publicKey) {
-    // Would need auth token
     var url = $"{GetRegistryUrl()}/packages/{name}/{version}";
     var cmd = $"curl -s -X PUT -F 'archive=@{archivePath}' -F 'signature={signature}' -F 'public_key={publicKey}' '{url}'";
-    var rc = system(cmd);
+    var rc = std.system(cmd);
     return rc == 0;
 }

@@ -44,6 +44,8 @@ echo
 echo "running migrations..."
 wrangler d1 execute kubex-registry-db --file=./migrations/0001_initial.sql
 wrangler d1 execute kubex-registry-db --file=./migrations/0002_admin.sql
+wrangler d1 execute kubex-registry-db --file=./migrations/0003_signing.sql
+wrangler d1 execute kubex-registry-db --file=./migrations/0004_sbom.sql
 echo "migrations applied"
 
 # Deploy the worker

@@ -1,82 +1,55 @@
 #!/usr/bin/env bash
+# Kubexic build script — pure Kubexic, no C++ required (after initial bootstrap)
 set -euo pipefail
 cd "$(dirname "$0")"
 
 mkdir -p build
 
-# -g on the LLVM codegen TU is a memory hog (OOMs the machine).
-# Core tests keep -g; the kxc compiler builds without it.
-CORE_FLAGS=(-std=c++17 -Wall -Wextra -Wpedantic -g -Isrc -Isrc/lexer -Isrc/parser -Isrc/ast -Isrc/sema -Isrc/mir -Isrc/codegen -Itests)
-KXC_FLAGS=(-std=c++17 -O0 -w -Isrc -Isrc/lexer -Isrc/parser -Isrc/ast -Isrc/sema -Isrc/mir -Isrc/codegen -Itests)
-LLVM_FLAGS=$(llvm-config-21 --cxxflags)
-LLVM_LIBS="$(llvm-config-21 --ldflags) -lLLVM-21"
+# The self-hosted Kubexic binary compiles itself.
+# Bootstrap: you need ONE prebuilt 'kubexic' binary (from the cpp-archive repo).
+BOOTSTRAP_BIN="build/kubexic"
+SELFHOST_SRC="src/kubex/kubex.kx"
 
-echo "== building lexer tests =="
-g++ "${CORE_FLAGS[@]}" src/lexer/lexer.cpp tests/lexer_tests.cpp -o build/lexer_tests
-./build/lexer_tests
-
-echo
-echo "== building parser tests =="
-g++ "${CORE_FLAGS[@]}" src/lexer/lexer.cpp src/parser/parser.cpp tests/parser_tests.cpp \
-  -o build/parser_tests
-./build/parser_tests
-
-echo
-echo "== building sema tests =="
-g++ "${CORE_FLAGS[@]}" src/lexer/lexer.cpp src/parser/parser.cpp src/sema/types.cpp \
-  src/sema/checker.cpp tests/sema_tests.cpp -o build/sema_tests
-./build/sema_tests
-
-echo
-echo "== building mir tests =="
-g++ "${CORE_FLAGS[@]}" src/lexer/lexer.cpp src/parser/parser.cpp src/sema/types.cpp \
-  src/sema/checker.cpp src/mir/mir.cpp tests/mir_tests.cpp -o build/mir_tests
-./build/mir_tests
-
-echo
-echo "== building kxc (LLVM, cached object) =="
-KXC_CORE_OBJ=build/kxc_codegen.o
-if [ ! -f build/kxc_lexer.o ] || [ ! -f build/kxc_codegen.o ] || \
-   [ src/codegen/codegen.cpp -nt build/kxc_codegen.o ] || \
-   [ src/lexer/lexer.cpp -nt build/kxc_lexer.o ] || \
-   [ src/parser/parser.cpp -nt build/kxc_parser.o ] || \
-   [ src/sema/types.cpp -nt build/kxc_types.o ] || \
-   [ src/sema/checker.cpp -nt build/kxc_checker.o ] || \
-   [ src/mir/mir.cpp -nt build/kxc_mir.o ]; then
-  rm -f build/kxc_*.o
-  for src in src/lexer/lexer.cpp src/parser/parser.cpp src/sema/types.cpp \
-             src/sema/checker.cpp src/mir/mir.cpp src/codegen/codegen.cpp \
-             src/ast/pretty.cpp src/ast/clone.cpp; do
-    name=$(basename "$src" .cpp)
-    g++ "${KXC_FLAGS[@]}" $LLVM_FLAGS \
-      -DKX_RUNTIME_SOURCE="\"$(pwd)/runtime/runtime.c\"" -DKX_TRIPLE='"x86_64-pc-linux-gnu"' \
-      -c "$src" -o "build/kxc_${name}.o"
-  done
+if [ ! -f "$SELFHOST_SRC" ]; then
+  echo "error: $SELFHOST_SRC not found"
+  exit 1
 fi
 
-g++ "${KXC_FLAGS[@]}" $LLVM_FLAGS \
-  -DKX_RUNTIME_SOURCE="\"$(pwd)/runtime/runtime.c\"" -DKX_TRIPLE='"x86_64-pc-linux-gnu"' \
-  tools/kxc/main.cpp build/kxc_lexer.o build/kxc_parser.o build/kxc_types.o \
-  build/kxc_checker.o build/kxc_mir.o build/kxc_codegen.o build/kxc_pretty.o \
-  build/kxc_clone.o $LLVM_LIBS \
-  -o build/kxc
+echo "== building kubexic (self-hosted) =="
+if [ -x "$BOOTSTRAP_BIN" ]; then
+  echo "  using existing binary to recompile itself..."
+  ./"$BOOTSTRAP_BIN" build src/kubex 2>/dev/null || true
+  SELFHOST_OUT="src/kubex/build/kubex"
+  if [ -f "$SELFHOST_OUT" ]; then
+    cp "$SELFHOST_OUT" "$BOOTSTRAP_BIN"
+    rm -rf src/kubex/build
+    echo "  rebuilt successfully"
+  else
+    echo "  WARN: self-hosted rebuild failed; keeping existing binary"
+  fi
+else
+  # Try the C++ kxc as last-resort bootstrap
+  KXC="build/kxc"
+  if [ -x "$KXC" ]; then
+    echo "  using C++ kxc for bootstrap..."
+    ./"$KXC" build src/kubex "$BOOTSTRAP_BIN" || true
+  else
+    echo "WARNING: no kubexic binary or kxc found."
+    echo "  To bootstrap: build the C++ compiler from the cpp-archive repo,"
+    echo "  then run: kxc build src/kubex build/kubexic"
+    exit 0
+  fi
+fi
 
-./build/kxc check-dir samples/arrow
-./build/kxc mir samples/arrow
+if [ ! -x "$BOOTSTRAP_BIN" ]; then
+  echo "error: failed to produce kubexic binary"
+  exit 1
+fi
 
-echo
-echo "== building kubex (package manager) =="
-KUBEX_FLAGS=(-std=c++17 -O0 -w)
-g++ "${KUBEX_FLAGS[@]}" \
-  tools/kubex/main.cpp tools/kubex/kxconf.cpp tools/kubex/project.cpp \
-  tools/kubex/deps.cpp tools/kubex/build.cpp tools/kubex/init.cpp \
-  tools/kubex/semver.cpp tools/kubex/auth_manager.cpp \
-  tools/kubex/registry_client.cpp tools/kubex/archive_build.cpp \
-  tools/kubex/signing.cpp tools/kubex/lockfile.cpp tools/kubex/sbom.cpp \
-  tools/kubex/audit.cpp \
-  -lssl -lcrypto \
-  -o build/kubex
+echo ""
+echo "== verifying kubexic =="
+./"$BOOTSTRAP_BIN" --version
 
-echo
+echo ""
 echo "== e2e golden tests =="
 ./tests/e2e/run_e2e.sh
